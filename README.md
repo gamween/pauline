@@ -1,6 +1,6 @@
 # Pauline
 
-A macOS menu bar switch that keeps a MacBook awake with the lid closed.
+A macOS menu bar app that keeps a MacBook awake with the lid closed.
 
 Turn it on, close the lid, and your builds, downloads and coding agents keep running. Turn it off and the Mac sleeps normally again. `caffeinate` and the apps built on it cannot do this: they block idle sleep, and closing the lid is not idle.
 
@@ -20,7 +20,7 @@ cd pauline
 ./install.sh
 ```
 
-Run the script as your user, not with `sudo`. It builds the app from source, copies it to `/Applications` and adds a launch agent that starts Pauline at every login and relaunches it after a crash. The switch then appears in the menu bar. macOS may show a "Background Items Added" notice: that is Pauline.
+Run the script as your user, not with `sudo`. It builds the app from source, copies it to `/Applications` and adds a launch agent that starts Pauline at every login and relaunches it after a crash. Pauline then appears in the menu bar. macOS may show a "Background Items Added" notice: that is Pauline.
 
 The script asks for your password once, to add one sudoers rule in `/etc/sudoers.d/pauline`:
 
@@ -36,10 +36,10 @@ Keep the cloned folder. To update, run `git pull && ./install.sh`. The rule is a
 
 | Action | Result |
 | --- | --- |
-| Click the switch | Turn Pauline on or off |
+| Click the icon | Turn Pauline on or off |
 | Right-click or Control-click | Menu: state, battery, **Stay Awake** or **Allow Sleep**, Telegram, **Quit Pauline** |
 
-Off is an outlined switch with the knob on the left: the Mac sleeps normally. On is a filled switch with the knob on the right: the Mac stays awake, even with the lid closed.
+The icon is the Apple emoji of a woman getting a massage while Pauline is off and the Mac sleeps normally, and a woman at her laptop while Pauline is on and the Mac stays awake, even with the lid closed. Pauline draws them at launch from the Apple Color Emoji font of your Mac, in one color that follows a light or dark menu bar. No emoji artwork ships with the app.
 
 Quitting turns Pauline off. To start it again, open it from Applications or Spotlight, or log in again.
 
@@ -47,7 +47,7 @@ Quitting turns Pauline off. To start it again, open it from Applications or Spot
 
 `pmset -a disablesleep 1` sets the system-wide `SleepDisabled` flag. It is the only setting that also keeps a closed lid awake, and it needs root. Pauline runs `sudo -k -n /usr/bin/pmset -a disablesleep 1`: `-n` never prompts and `-k` ignores a password cached in a terminal, so only the sudoers rule lets it through. Turning off is the same command with `0`.
 
-Every 5 seconds, Pauline reads the flag and the lid from the kernel, along with the battery, the displays and the thermal state. The switch always shows the real state, even when you change the flag from Terminal. Putting the Mac or its screen to sleep (`pmset sleepnow`, `pmset displaysleepnow`) needs no root.
+Every 5 seconds, Pauline reads the flag and the lid from the kernel, along with the battery, the displays and the thermal state. The icon always shows the real state, even when you change the flag from Terminal. Putting the Mac or its screen to sleep (`pmset sleepnow`, `pmset displaysleepnow`) needs no root.
 
 ## Safety
 
@@ -79,7 +79,7 @@ Optional. Pauline talks to your own bot through the Telegram Bot API, with long 
 
 ### Connect
 
-1. Right-click the switch, then **Connect Telegram…**
+1. Right-click the icon, then **Connect Telegram…**
 2. Click **Open BotFather**, send `/newbot` and follow the steps. Use a new bot for each Mac: two Macs cannot read the same bot.
 3. Paste the token BotFather gives you and click **Connect**.
 4. Telegram opens the chat with your bot. Tap **Start**. If Telegram is only on your phone, scan the QR code Pauline shows. **Open the Bot Chat…** in the menu brings the link back until you tap Start.
@@ -112,7 +112,7 @@ The battery line follows the power source: `Battery 41%, 3 h 20 min left`, `Batt
 | `(Pauline crashed)` | Pauline crashed. Sent when launchd relaunches it. |
 | `(Mac restarted)` | Power loss, kernel panic or forced restart. Sent at the next login. |
 
-The switch, the menu, `/off`, the button, Quit, a reinstall and `pmset` in Terminal close without a reason.
+The icon, the menu, `/off`, the button, Quit, a reinstall and `pmset` in Terminal close without a reason.
 
 The closing message is always the last one of a session. Pauline saves the session to disk before the opening message goes out, so a crash, a restart or a network outage only delays the closing message. Reminders and replies that cannot leave within 2 minutes are dropped. A closed Mac waits at most 10 seconds for the closing message before going to sleep.
 
@@ -156,11 +156,11 @@ Sources/PaulineCore/     rules and texts in plain Swift, no system calls, unit t
   StatusText.swift       menu, tooltip and refusal alert texts
 Sources/Pauline/         the AppKit app: reads the system, runs pmset, talks to Telegram
   main.swift             entry point, one copy at a time, handover to launchd
-  AppDelegate.swift      switch, menu, checks every 5 seconds, quitting, Telegram setup
+  AppDelegate.swift      icon, menu, checks every 5 seconds, quitting, Telegram setup
   System.swift           IOKit and display readings, pmset calls
   Telegram.swift         Bot API client, long polling, ordered outbox, sessions on disk
   QRCode.swift           the Start link as a QR code
-  SwitchIcon.swift       the switch icon
+  EmojiIcon.swift        the two Apple emoji as monochrome menu bar icons
 Tests/PaulineCoreTests/  Swift Testing suites
 Support/Info.plist       bundle metadata, menu bar only
 Support/common.sh        paths and helpers shared by the install scripts

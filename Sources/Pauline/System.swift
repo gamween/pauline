@@ -6,7 +6,7 @@ import PaulineCore
 
 /// The system-wide sleep flag and the lid, read straight from the kernel and written through pmset.
 enum SleepSetting {
-    /// `pmset -a disablesleep` is the only switch that also covers a closed lid.
+    /// `pmset -a disablesleep` is the only setting that also covers a closed lid.
     /// It needs root, so it goes through `sudo -n`, allowed by the rule `install.sh` adds.
     /// `-k` ignores cached sudo credentials, so only that rule can make it pass.
     /// Returns false when the rule is missing.

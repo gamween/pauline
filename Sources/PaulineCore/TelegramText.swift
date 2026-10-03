@@ -1,6 +1,6 @@
 /// Why Pauline turned off, told in the closing message.
 public enum CloseReason: String, Codable, Sendable, CaseIterable {
-    /// The switch or the menu.
+    /// The menu bar icon or its menu.
     case mac
     /// `/off` or the Turn Pauline off button.
     case telegram

@@ -33,7 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installEditMenu()
-        // AppKit remembers a hidden status item across launches: always show the switch.
+        // AppKit remembers a hidden status item across launches: always show the icon.
         statusItem.isVisible = true
         if let button = statusItem.button {
             button.target = self
@@ -77,8 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         isTerminating = true
         timer?.invalidate()
-        // Quitting: the switch greys out, and the guards ignore clicks that could start a session behind
-        // the closing message. Not isVisible = false: AppKit would save it and hide the switch for good.
+        // Quitting: the icon greys out, and the guards ignore clicks that could start a session behind
+        // the closing message. Not isVisible = false: AppKit would save it and hide the icon for good.
         statusItem.button?.isEnabled = false
         if let reason = Self.quitReasonFromMacOS() {
             quitReason = reason
@@ -194,7 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         render(state)
     }
 
-    /// Turns Pauline off while it runs: switch or menu, Telegram, battery floor or heat.
+    /// Turns Pauline off while it runs: icon or menu, Telegram, battery floor or heat.
     /// Sleep comes back right away; a closed Mac waits for the closing message before it sleeps.
     private func giveSleepBack(_ actions: [Action], reason: CloseReason, state: PowerState) {
         let sleeping = actions.contains(.sleepNow)
@@ -257,7 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func render(_ state: PowerState) {
-        statusItem.button?.image = SwitchIcon.image(on: state.sleepDisabled)
+        statusItem.button?.image = state.sleepDisabled ? EmojiIcon.on : EmojiIcon.off
         statusItem.button?.toolTip = StatusText.tooltip(state)
 
         // Without this, App Nap could delay the battery and lid checks while the Mac runs lid closed.
