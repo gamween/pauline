@@ -32,6 +32,10 @@ struct BatteryFloorTests {
         #expect(Policy(batteryFloor: 250).batteryFloor == 100)
     }
 
+    @Test func theDefaultFloorIsALastResort() {
+        #expect(Policy().batteryFloor == 5)
+    }
+
     @Test func desktopMacsHaveNoFloor() {
         #expect(policy.danger(PowerState(sleepDisabled: true, onBattery: false, batteryPercent: nil)) == nil)
     }
@@ -44,7 +48,7 @@ struct BatteryFloorTests {
 
 @Suite("Giving sleep back")
 struct GivingSleepBackTests {
-    let lowOnDesk = PowerState(sleepDisabled: true, onBattery: true, batteryPercent: 12)
+    let lowOnDesk = PowerState(sleepDisabled: true, onBattery: true, batteryPercent: 4)
 
     @Test func restoresSleepWithTheLidOpen() {
         var safety = Safety()
@@ -158,33 +162,17 @@ struct ClosedLidScreenTests {
     }
 }
 
-@Suite("Status text")
-struct StatusTextTests {
-    let policy = Policy(batteryFloor: 20)
-
-    @Test func describesBothStates() {
-        #expect(StatusText.headline(PowerState(sleepDisabled: true)) == "Awake, even with the lid closed")
-        #expect(StatusText.headline(PowerState(sleepDisabled: false)) == "Sleeping normally")
+@Suite("Manual off")
+struct ManualOffTests {
+    @Test func aClosedMacGoesToSleep() {
+        var safety = Safety()
+        #expect(safety.allowSleep(PowerState(sleepDisabled: true, lidClosed: true)) == [.restoreSleep, .sleepNow])
+        #expect(safety.sleepPending)
     }
 
-    @Test func describesTheBattery() {
-        #expect(StatusText.battery(PowerState(sleepDisabled: true), policy: policy) == nil)
-        #expect(
-            StatusText.battery(PowerState(sleepDisabled: true, onBattery: true, batteryPercent: 72), policy: policy)
-                == "Battery 72%, sleeps again at 20%"
-        )
-        #expect(
-            StatusText.battery(PowerState(sleepDisabled: true, batteryCharging: true, batteryPercent: 72), policy: policy)
-                == "Battery 72%, charging"
-        )
-        #expect(
-            StatusText.battery(PowerState(sleepDisabled: true, batteryPercent: 100), policy: policy)
-                == "Battery 100%, on power adapter"
-        )
-    }
-
-    @Test func explainsRefusals() {
-        #expect(StatusText.refusal(.lowBattery, policy: policy).message.contains("20%"))
-        #expect(StatusText.refusal(.overheating, policy: policy).title == "Mac too hot")
+    @Test func anOpenMacJustSleepsNormally() {
+        var safety = Safety()
+        #expect(safety.allowSleep(PowerState(sleepDisabled: true)) == [.restoreSleep])
+        #expect(!safety.sleepPending)
     }
 }

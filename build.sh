@@ -8,10 +8,10 @@ if ! xcrun --find swift >/dev/null 2>&1; then
   echo "Swift is missing. Install the Xcode Command Line Tools: xcode-select --install" >&2
   exit 1
 fi
-major="$(xcrun swift --version 2>/dev/null | sed -nE 's/.*Swift version ([0-9]+).*/\1/p' | head -n 1)"
+major="$(swift --version 2>/dev/null | sed -nE 's/.*Swift version ([0-9]+).*/\1/p' | head -n 1)"
 if [ "${major:-0}" -lt 6 ]; then
-  echo "Pauline needs Swift 6 or later (Xcode 16 or its Command Line Tools, macOS 14.5 or later)." >&2
-  echo "Found: $(xcrun swift --version 2>&1 | head -n 1)" >&2
+  echo "Pauline needs Swift 6 or later. Found: $(swift --version 2>&1 | head -n 1)" >&2
+  echo "Swift 6 comes with Xcode 16 or its Command Line Tools, on macOS 14.5 or later." >&2
   exit 1
 fi
 
