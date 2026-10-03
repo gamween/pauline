@@ -61,7 +61,7 @@ After Quit, open Pauline again from Applications or Spotlight.
 
 A closed MacBook under heavy load still gets hot. Leave it on a desk, not in a bag.
 
-To change the battery floor (0 turns it off), run this, it applies within 5 seconds:
+To change the battery floor (0 turns it off), run this, it applies within a few seconds:
 
 ```bash
 defaults write com.gamween.pauline BatteryFloor -int 10
@@ -85,7 +85,7 @@ Each time the switch goes on, the chat says whether Pauline is on or off, with t
 | Charging is done | `Pauline is on` and `Battery 100%, charged` |
 | Pauline turns off | `Pauline is off` and the battery |
 
-When you did not turn it off yourself, the closing message says why: `(battery low)`, `(too hot)`, `(Mac shut down)`, `(Pauline crashed)` or `(Mac restarted)`.
+When you did not turn it off yourself, the closing message says why: `(battery low)`, `(too hot)`, `(logged out)`, `(Mac restarting)`, `(Mac shut down)`, `(Pauline crashed)` or `(Mac restarted)`.
 
 The closing message is always the last one of a session:
 
@@ -100,7 +100,7 @@ The closing message is always the last one of a session:
 | The Mac turns off suddenly (forced restart, kernel panic, empty battery with the floor at 0) | at the next login |
 | The Mac has no internet at that moment | when it is back online, or at the next launch of Pauline if it quit in the meantime |
 
-**Disconnect Telegram** while Pauline is on sends a last message too: `Pauline is disconnected from this chat. It is still on.`
+**Disconnect Telegram** while Pauline is on sends a last message too: `Pauline is disconnected from this chat. It is still on.` Without internet at that moment, the chat keeps its last message and Pauline tells you so.
 
 | Command | Answer |
 | --- | --- |

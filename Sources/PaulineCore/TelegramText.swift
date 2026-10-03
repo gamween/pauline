@@ -10,8 +10,11 @@ public enum CloseReason: String, Codable, Sendable, CaseIterable {
     case quit
     /// Stopped by a signal, for example while reinstalling.
     case stopped
-    /// Shutdown, restart or logout.
+    /// Shutdown, or a logout or restart macOS did not name.
     case shutdown
+    case logout
+    /// A restart chosen in macOS.
+    case restarting
     /// Pauline crashed, launchd started it again.
     case crash
     /// The Mac restarted without a clean shutdown: power loss, kernel panic, forced restart.
@@ -61,6 +64,8 @@ public enum TelegramText {
         case .lowBattery: tag = " (battery low)"
         case .overheating: tag = " (too hot)"
         case .shutdown: tag = " (Mac shut down)"
+        case .logout: tag = " (logged out)"
+        case .restarting: tag = " (Mac restarting)"
         case .crash: tag = " (Pauline crashed)"
         case .restart: tag = " (Mac restarted)"
         case .mac, .telegram, .quit, .stopped, .elsewhere: tag = ""

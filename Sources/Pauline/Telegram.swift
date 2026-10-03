@@ -19,9 +19,11 @@ struct TelegramConfig: Codable, Equatable {
 
     struct Session: Codable, Equatable {
         var start: Date
-        /// The closing message as it reads when sent late, written the moment the session ends,
-        /// so a crash or a restart before it goes out still closes the session with the right words.
+        /// The closing message, written the moment the session ends, so a crash or a restart
+        /// before it goes out still closes the session with the right words.
         var closingText: String?
+        /// Why it will end, when Pauline quit while it could not end it (pmset refused).
+        var endReason: CloseReason?
     }
 
     private static var folder: URL {
@@ -97,8 +99,9 @@ struct TelegramAPI: Sendable {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         guard let envelope = try? decoder.decode(Envelope<Result>.self, from: data) else {
-            let status = (response as? HTTPURLResponse)?.statusCode
-            throw Failure(code: status, errorDescription: "Telegram sent an unexpected answer.")
+            // Not a Bot API answer (a proxy, an outage page): no Telegram error code, so it is retried like a network error.
+            let status = (response as? HTTPURLResponse)?.statusCode.description ?? "?"
+            throw Failure(code: nil, errorDescription: "Telegram sent an unexpected answer (HTTP \(status)).")
         }
         guard envelope.ok, let result = envelope.result else {
             throw Failure(
@@ -214,6 +217,8 @@ final class TelegramBot {
     private var retryNow = false
     /// Bumped by stop(), so a worker cancelled by a reconnect cannot touch the new outbox.
     private var generation = 0
+    /// Disconnecting: the last message is on its way, nothing new may be queued behind it.
+    private var leaving = false
     private var pollTask: Task<Void, Never>?
     private var offset: Int?
 
@@ -284,13 +289,13 @@ final class TelegramBot {
 
     // MARK: Lifecycle
 
-    /// Starts listening. A session left open by a quit while offline, a crash or a restart gets its closing now.
+    /// Starts listening. A session left open by a quit while offline, a crash or a restart gets its closing now,
+    /// unless Pauline could not give sleep back at launch: then it is still running and stays open.
     func start(bootedAt boot: Date?, state: PowerState) {
         guard let config else { return }
-        if let session = config.session {
-            let text = session.closingText ?? TelegramText.closed(
-                (boot.map { $0 > session.start } ?? false) ? .restart : .crash, state: state
-            )
+        if let session = config.session, session.closingText != nil || !state.sleepDisabled {
+            let reason = session.endReason ?? ((boot.map { $0 > session.start } ?? false) ? .restart : .crash)
+            let text = session.closingText ?? TelegramText.closed(reason, state: state)
             enqueue(Outgoing(kind: .closing(session.start), text: text))
         }
         if isLinked {
@@ -331,7 +336,7 @@ final class TelegramBot {
 
         let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
         let code = String((0..<16).map { _ in alphabet.randomElement()! })
-        await disconnect()
+        _ = await disconnect()
         config = TelegramConfig(token: token, botUsername: username, chatID: nil, linkCode: code, session: nil)
         config?.save()
         pollTask = Task { await poll() }
@@ -340,20 +345,39 @@ final class TelegramBot {
 
     /// Leaves the chat in a clean state, then forgets the bot. A session still running gets a last message
     /// saying the chat stops here, a closing already queued gets a few seconds to go out.
-    func disconnect() async {
-        if isLinked, let start = activeStart {
-            if dropUnannouncedOpening(start) == false {
-                enqueue(Outgoing(kind: .farewell(start), text: TelegramText.disconnected))
+    /// Returns false when that last message could not leave (no internet).
+    func disconnect() async -> Bool {
+        guard !leaving else { return true }
+        if isLinked, let start = activeStart, dropUnannouncedOpening(start) == false {
+            enqueue(Outgoing(kind: .farewell(start), text: TelegramText.disconnected))
+        }
+        // From here on nothing may follow the last message: no polling, no new opening, notice or reply.
+        leaving = true
+        pollTask?.cancel()
+        pollTask = nil
+        await drain(timeout: 5)
+        let delivered = !outbox.contains { item in
+            switch item.kind {
+            case .closing, .farewell: return true
+            case .opening, .notice, .reply: return false
             }
         }
-        await drain(timeout: 5)
         stop()
         TelegramConfig.delete()
         config = nil
+        return delivered
+    }
+
+    /// Pauline quits while stay awake stays on (pmset refused): the next launch closes the session as a quit.
+    func keepOpenAfterQuit() {
+        guard isLinked, let start = activeStart, config?.session?.start == start else { return }
+        config?.session?.endReason = .quit
+        config?.save()
     }
 
     private func stop() {
         generation += 1
+        leaving = false
         pollTask?.cancel()
         pollTask = nil
         worker?.cancel()
@@ -370,7 +394,7 @@ final class TelegramBot {
     /// Lines the chat up with the real state: an opening message once stay awake is on,
     /// a closing one when it went off without Pauline closing it (from Terminal, for example).
     func sync(_ state: PowerState) {
-        guard isLinked else { return }
+        guard isLinked, !leaving else { return }
         if state.sleepDisabled {
             if activeStart == nil {
                 let start = Date()
@@ -383,7 +407,7 @@ final class TelegramBot {
 
     /// Ends the session the chat sees as running, if any, with this reason.
     func close(_ reason: CloseReason, state: PowerState) {
-        guard isLinked, let start = activeStart else { return }
+        guard isLinked, !leaving, let start = activeStart else { return }
         // Reminders still waiting are no longer true.
         outbox.removeAll { $0.isNotice && $0.id != sending }
         // Turned on and off before the opening was ever tried: nothing was announced, nothing to close.
@@ -399,12 +423,12 @@ final class TelegramBot {
 
     /// A reminder or the charging message, with an Allow sleep button when asked.
     func notify(_ text: String, allowSleepButton: Bool) {
-        guard isLinked, let start = activeStart else { return }
+        guard isLinked, !leaving, let start = activeStart else { return }
         enqueue(Outgoing(kind: .notice, text: text, button: allowSleepButton ? start : nil))
     }
 
     func reply(_ text: String) {
-        guard isLinked else { return }
+        guard isLinked, !leaving else { return }
         enqueue(Outgoing(kind: .reply, text: text))
     }
 
@@ -480,6 +504,11 @@ final class TelegramBot {
                 continue
             }
             sendProblem = Self.problem(failure) ?? sendProblem
+            // close() spared this reminder only because it was in flight. It failed, and its session is over.
+            if item.isNotice, outbox.contains(where: { $0.session != nil && !$0.isOpening }) {
+                outbox.removeFirst()
+                continue
+            }
             let lasting = [401, 403, 404].contains(failure.code ?? 0)
             if failure.code == 400 {
                 // A malformed request never succeeds: give up on it rather than block the queue.

@@ -164,6 +164,8 @@ struct TelegramTextTests {
         #expect(TelegramText.closed(.shutdown, state: onBattery(50)).hasPrefix("Pauline is off (Mac shut down)\n"))
         #expect(TelegramText.closed(.crash, state: onBattery(50)).hasPrefix("Pauline is off (Pauline crashed)\n"))
         #expect(TelegramText.closed(.restart, state: onBattery(50)).hasPrefix("Pauline is off (Mac restarted)\n"))
+        #expect(TelegramText.closed(.logout, state: onBattery(50)).hasPrefix("Pauline is off (logged out)\n"))
+        #expect(TelegramText.closed(.restarting, state: onBattery(50)).hasPrefix("Pauline is off (Mac restarting)\n"))
     }
 
     @Test func everyClosingStartsTheSameWay() {
