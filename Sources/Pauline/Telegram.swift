@@ -219,6 +219,10 @@ final class TelegramBot {
     private var generation = 0
     /// Disconnecting: the last message is on its way, nothing new may be queued behind it.
     private var leaving = false
+    /// Drains waiting right now (quit, held sleep, disconnect): retries come every second, not after a long backoff.
+    private var drains = 0
+    /// Why the session will end, when Pauline quit while it could not end it, for an opening not yet on disk.
+    private var quitEndReason: CloseReason?
     private var pollTask: Task<Void, Never>?
     private var offset: Int?
 
@@ -296,7 +300,15 @@ final class TelegramBot {
         if let session = config.session, session.closingText != nil || !state.sleepDisabled {
             let reason = session.endReason ?? ((boot.map { $0 > session.start } ?? false) ? .restart : .crash)
             let text = session.closingText ?? TelegramText.closed(reason, state: state)
+            if session.closingText == nil {
+                self.config?.session?.closingText = text
+                self.config?.save()
+            }
             enqueue(Outgoing(kind: .closing(session.start), text: text))
+        } else if config.session?.endReason != nil {
+            // Still running after all: the reason of an earlier quit no longer applies.
+            self.config?.session?.endReason = nil
+            self.config?.save()
         }
         if isLinked {
             setCommands()
@@ -345,9 +357,9 @@ final class TelegramBot {
 
     /// Leaves the chat in a clean state, then forgets the bot. A session still running gets a last message
     /// saying the chat stops here, a closing already queued gets a few seconds to go out.
-    /// Returns false when that last message could not leave (no internet).
-    func disconnect() async -> Bool {
-        guard !leaving else { return true }
+    /// Returns why that last message could not leave, nil when it did.
+    func disconnect() async -> String? {
+        guard !leaving else { return nil }
         if isLinked, let start = activeStart, dropUnannouncedOpening(start) == false {
             enqueue(Outgoing(kind: .farewell(start), text: TelegramText.disconnected))
         }
@@ -356,22 +368,24 @@ final class TelegramBot {
         pollTask?.cancel()
         pollTask = nil
         await drain(timeout: 5)
-        let delivered = !outbox.contains { item in
+        let stuck = outbox.contains { item in
             switch item.kind {
             case .closing, .farewell: return true
             case .opening, .notice, .reply: return false
             }
         }
+        let problem = stuck ? (sendProblem ?? "Telegram could not be reached in time, the chat keeps its previous message.") : nil
         stop()
         TelegramConfig.delete()
         config = nil
-        return delivered
+        return problem
     }
 
-    /// Pauline quits while stay awake stays on (pmset refused): the next launch closes the session as a quit.
-    func keepOpenAfterQuit() {
+    /// Pauline quits while it stays on (pmset refused): the next launch closes the session with this reason.
+    func keepOpenAfterQuit(_ reason: CloseReason) {
+        quitEndReason = reason
         guard isLinked, let start = activeStart, config?.session?.start == start else { return }
-        config?.session?.endReason = .quit
+        config?.session?.endReason = reason
         config?.save()
     }
 
@@ -435,6 +449,8 @@ final class TelegramBot {
     /// Waits until every queued message went out, or the timeout.
     func drain(timeout: TimeInterval) async {
         retryNow = true
+        drains += 1
+        defer { drains -= 1 }
         let deadline = Date().addingTimeInterval(timeout)
         while !outbox.isEmpty, Date() < deadline {
             try? await Task.sleep(for: .milliseconds(100))
@@ -476,7 +492,9 @@ final class TelegramBot {
             }
             if case .opening(let start) = item.kind, config.session?.start != start {
                 // Written before sending: if the answer is lost and Pauline stops, the next launch still closes it.
-                self.config?.session = TelegramConfig.Session(start: start, closingText: queuedClosingText(for: start))
+                self.config?.session = TelegramConfig.Session(
+                    start: start, closingText: queuedClosingText(for: start), endReason: quitEndReason
+                )
                 self.config?.save()
             }
 
@@ -520,7 +538,8 @@ final class TelegramBot {
                 outbox.removeFirst()
                 continue
             }
-            if await backoff(seconds: failure.retryAfter ?? (lasting ? 60 : delay), interruptible: failure.retryAfter == nil) {
+            let wait = failure.retryAfter ?? (lasting ? 60 : (drains > 0 ? 1 : delay))
+            if await backoff(seconds: wait, interruptible: failure.retryAfter == nil) {
                 delay = 5
             } else if failure.retryAfter == nil {
                 delay = min(delay * 2, 60)

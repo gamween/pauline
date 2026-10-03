@@ -26,6 +26,14 @@ pkill -x Pauline 2>/dev/null || true
 sudo -k -n /usr/bin/pmset -a disablesleep 0 2>/dev/null || true
 
 still_awake() { ioreg -r -c IOPMrootDomain -d 1 | grep -q '"SleepDisabled" = Yes'; }
+# powerd applies a change a moment after pmset returns.
+settle() { for _ in 1 2 3 4 5 6 7 8 9 10; do still_awake || return 0; sleep 0.2; done; return 1; }
+
+if ! settle; then
+  echo "macOS asks for your password to give sleep back."
+  as_root "/usr/bin/pmset -a disablesleep 0" || true
+  settle || true
+fi
 
 # Pauline sends the Telegram closing message as it quits. If it could not (offline), try once more,
 # and only if sleep really came back: the chat must never read "off" while the Mac is still awake.
@@ -33,7 +41,10 @@ config="$HOME/Library/Application Support/Pauline/telegram.json"
 if [ -f "$config" ] && ! still_awake && plutil -extract session json -o /dev/null "$config" >/dev/null 2>&1; then
   token="$(plutil -extract token raw -o - "$config" 2>/dev/null || true)"
   chat="$(plutil -extract chatID raw -o - "$config" 2>/dev/null || true)"
-  text="$(plutil -extract session.closingText raw -o - "$config" 2>/dev/null || echo "Pauline is off (uninstalled)")"
+  pct="$(pmset -g batt | grep -Eo '[0-9]+%' | head -n 1 || true)"
+  battery="No battery"
+  if [ -n "$pct" ]; then battery="Battery $pct"; fi
+  text="$(plutil -extract session.closingText raw -o - "$config" 2>/dev/null || printf 'Pauline is off\n%s' "$battery")"
   if [ -n "$token" ] && [ -n "$chat" ]; then
     curl -s -m 5 -o /dev/null "https://api.telegram.org/bot$token/sendMessage" \
       --data-urlencode "chat_id=$chat" --data-urlencode "text=$text" || true

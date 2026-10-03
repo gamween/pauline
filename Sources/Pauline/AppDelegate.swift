@@ -29,6 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installEditMenu()
+        // AppKit remembers a hidden status item across launches: always show the switch.
+        statusItem.isVisible = true
         if let button = statusItem.button {
             button.target = self
             button.action = #selector(buttonClicked)
@@ -72,8 +74,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         isTerminating = true
         timer?.invalidate()
-        // Quitting: no more clicks that could start a new session behind the closing message.
-        statusItem.isVisible = false
+        // Quitting: the switch greys out, and the guards ignore clicks that could start a session behind
+        // the closing message. Not isVisible = false: AppKit would save it and hide the switch for good.
+        statusItem.button?.isEnabled = false
         if let reason = Self.quitReasonFromMacOS() {
             quitReason = reason
         }
@@ -83,7 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if state.sleepDisabled, !permitted {
             // Still awake: say so, and keep the session on disk for the next launch to close as a quit.
-            telegram.keepOpenAfterQuit()
+            telegram.keepOpenAfterQuit(quitReason)
             telegram.notify(TelegramText.quitStillAwake, allowSleepButton: false)
         } else {
             telegram.close(quitReason, state: state)
@@ -429,8 +432,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Settle the session first, so the last message says the truth about Pauline.
         telegram.sync(PowerState.current())
         Task {
-            if await telegram.disconnect() == false {
-                afterThisTask { $0.alert("Telegram was not told", "No internet: the chat keeps its last message.") }
+            if let problem = await telegram.disconnect() {
+                afterThisTask { $0.alert("Telegram was not told", problem) }
             }
         }
     }
