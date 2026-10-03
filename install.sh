@@ -107,6 +107,6 @@ for attempt in 1 2 3 4 5; do
   sleep 1
 done
 
-printf '\nDone. Pauline is the cup in your menu bar.\n'
+printf '\nDone. Pauline is the switch in your menu bar.\n'
 printf '  Click        stay awake with the lid closed, click again to sleep normally\n'
 printf '  Right-click  status, battery and Quit\n'

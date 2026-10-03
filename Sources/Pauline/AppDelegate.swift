@@ -3,7 +3,7 @@ import PaulineCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var safety = Safety()
     private var permitted = true
     private var timer: Timer?
@@ -74,10 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func render(_ state: PowerState) {
-        let symbol = state.sleepDisabled ? "cup.and.saucer.fill" : "cup.and.saucer"
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: StatusText.headline(state))
-        image?.isTemplate = true
-        statusItem.button?.image = image
+        statusItem.button?.image = SwitchIcon.image(on: state.sleepDisabled)
         statusItem.button?.toolTip = StatusText.tooltip(state)
 
         // Without this, App Nap could delay the battery and lid checks while the Mac runs lid closed.
