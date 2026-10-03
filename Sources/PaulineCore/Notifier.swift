@@ -1,4 +1,4 @@
-/// Something worth a Telegram message while stay awake is on.
+/// Something worth a Telegram message while Pauline is on.
 public enum Notice: Equatable, Sendable {
     /// The battery went down past one of the reminder levels.
     case batteryLow(percent: Int)
@@ -7,10 +7,10 @@ public enum Notice: Equatable, Sendable {
 }
 
 /// Decides when to send a reminder, from one reading to the next.
-/// Opening and closing messages are not here: they follow the stay awake state itself.
+/// Opening and closing messages are not here: they follow Pauline turning on and off.
 public struct Notifier: Sendable {
     /// Battery levels that get a reminder, once each per discharge.
-    public static let reminderLevels = [30, 20, 10]
+    static let reminderLevels = [30, 20, 10]
     /// How far the battery must charge back above a level before its reminder can fire again.
     static let rearmMargin = 5
     /// How far the charge must move from the last "charging done" before another one,
@@ -41,7 +41,7 @@ public struct Notifier: Sendable {
             let crossed = Set(Self.reminderLevels.filter { percent <= $0 }).subtracting(reminded)
             reminded.formUnion(crossed)
             // A level counts when the battery went past it while watched. When the drain just started
-            // (stay awake turned on, cable out, charging stopped), levels at or above the previous
+            // (Pauline turned on, cable out, charging stopped), levels at or above the previous
             // reading were already behind: they are the starting point, without a message.
             let watched = wasOn && (previous?.draining ?? false)
             let startingPoint = watched ? Int.max : (previous?.batteryPercent ?? percent)
@@ -63,7 +63,7 @@ public struct Notifier: Sendable {
         }
         if !current.onBattery, !current.batteryCharging, current.chargeComplete, lastChargedPercent == nil {
             lastChargedPercent = percent
-            // Already charged when stay awake turned on, or plugged in already full: nothing was watched charging.
+            // Already charged when Pauline turned on, or plugged in already full: nothing was watched charging.
             if wasOn, sawCharging {
                 notices.append(.chargingDone(percent: percent))
             }

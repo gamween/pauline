@@ -1,5 +1,3 @@
-import AppKit
-import CoreImage.CIFilterBuiltins
 import Foundation
 import PaulineCore
 
@@ -7,17 +5,17 @@ import PaulineCore
 /// ~/Library/Application Support/Pauline/telegram.json. The folder is private to the user (0700)
 /// and the file too (0600). Not the Keychain on purpose: every local rebuild changes the ad hoc
 /// signature, and macOS would ask for the password again.
-struct TelegramConfig: Codable, Equatable {
+struct TelegramConfig: Codable {
     var token: String
     var botUsername: String
     /// Set once the user taps Start in the chat with the bot.
     var chatID: Int64?
     /// Secret carried by the Start link, so only that tap can link a chat.
     var linkCode: String?
-    /// The stay awake session whose opening message was sent (or tried) and whose closing message has not gone out yet.
+    /// The session whose opening message was sent (or tried) and whose closing message has not gone out yet.
     var session: Session?
 
-    struct Session: Codable, Equatable {
+    struct Session: Codable {
         var start: Date
         /// The closing message, written the moment the session ends, so a crash or a restart
         /// before it goes out still closes the session with the right words.
@@ -37,7 +35,12 @@ struct TelegramConfig: Codable, Equatable {
         guard let data = try? Data(contentsOf: file) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
-        return try? decoder.decode(TelegramConfig.self, from: data)
+        do {
+            return try decoder.decode(TelegramConfig.self, from: data)
+        } catch {
+            NSLog("Pauline could not read the Telegram settings: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     func save() {
@@ -55,13 +58,22 @@ struct TelegramConfig: Codable, Equatable {
     }
 
     static func delete() {
-        try? FileManager.default.removeItem(at: file)
+        do {
+            try FileManager.default.removeItem(at: file)
+        } catch CocoaError.fileNoSuchFile {
+            // Already gone.
+        } catch {
+            NSLog("Pauline could not delete the Telegram settings: \(error.localizedDescription)")
+        }
     }
 }
 
 /// A thin client for the few Bot API methods Pauline uses.
 struct TelegramAPI: Sendable {
     let token: String
+
+    /// Ephemeral: no cache or cookie store on disk, so the bot token in each URL never lands there.
+    private static let session = URLSession(configuration: .ephemeral)
 
     /// A Bot API error, with Telegram's error code when there is one.
     struct Failure: LocalizedError {
@@ -95,7 +107,7 @@ struct TelegramAPI: Sendable {
         encoder.keyEncodingStrategy = .convertToSnakeCase
         request.httpBody = try encoder.encode(body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await Self.session.data(for: request)
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         guard let envelope = try? decoder.decode(Envelope<Result>.self, from: data) else {
@@ -174,10 +186,10 @@ struct TelegramAPI: Sendable {
     }
 
     struct SetCommands: Encodable, Sendable {
-        let commands: [Command]
+        let commands: [BotCommand]
     }
 
-    struct Command: Encodable, Sendable {
+    struct BotCommand: Encodable, Sendable {
         let command: String
         let description: String
     }
@@ -189,10 +201,11 @@ struct TelegramAPI: Sendable {
 
 /// Talks to the user's own bot. No server involved: Pauline asks Telegram for new messages with long polling.
 ///
-/// Every stay awake session gets an opening message and, whatever ends it, a closing message that stays
-/// the last one of the session. Messages leave one at a time, in order, from an outbox. A session is written
-/// to disk before its opening is sent and erased once its closing went out, so a crash, a power loss or a
-/// network outage still ends with a closing message, on the next launch at the latest.
+/// Every session, from Pauline on to Pauline off, gets an opening message and, whatever ends it,
+/// a closing message that stays the last one of the session. Messages leave one at a time, in order,
+/// from an outbox. A session is written to disk before its opening is sent and erased once its closing
+/// went out, so a crash, a power loss or a network outage still ends with a closing message, on the
+/// next launch at the latest.
 @MainActor
 final class TelegramBot {
     enum Command {
@@ -203,7 +216,7 @@ final class TelegramBot {
     /// Called for each command from the linked chat.
     var onCommand: ((Command) -> Void)?
 
-    private(set) var config = TelegramConfig.load()
+    private var config = TelegramConfig.load()
     /// Lasting problems for the menu. Sending and polling keep their own, so one success cannot hide the other.
     private var sendProblem: String?
     private var pollProblem: String?
@@ -226,11 +239,11 @@ final class TelegramBot {
     private var pollTask: Task<Void, Never>?
     private var offset: Int?
 
-    struct Outgoing {
+    private struct Outgoing {
         enum Kind {
             /// Opens the session that started at this date.
             case opening(Date)
-            /// A reminder or the charging message, dropped once the session closes or after 2 minutes.
+            /// A reminder, the charging message or a warning, dropped once the session closes or after 2 minutes.
             case notice
             /// An answer to a command, dropped after 2 minutes.
             case reply
@@ -244,8 +257,8 @@ final class TelegramBot {
         let kind: Kind
         let created = Date()
         let text: String
-        /// The session an Allow sleep button belongs to.
-        var button: Date?
+        /// Adds a Turn Pauline off button, tied to the session that started at this date.
+        var offButton: Date?
 
         /// The session this message opens or ends.
         var session: Date? {
@@ -263,6 +276,14 @@ final class TelegramBot {
         var isOpening: Bool {
             if case .opening = kind { return true }
             return false
+        }
+
+        /// A closing or a farewell: the last message of its session.
+        var endsSession: Bool {
+            switch kind {
+            case .closing, .farewell: return true
+            case .opening, .notice, .reply: return false
+            }
         }
     }
 
@@ -285,10 +306,12 @@ final class TelegramBot {
         return active
     }
 
-    /// The link that opens the bot chat with the secret code, while waiting for Start.
-    var startLink: URL? {
-        guard let config, let code = config.linkCode else { return nil }
-        return URL(string: "https://t.me/\(config.botUsername)?start=\(code)")
+    /// The links that open the bot chat with the secret code, while waiting for Start:
+    /// one for Telegram for Mac, one for the web and the QR code.
+    var startLinks: (app: String, web: URL)? {
+        guard let config, let code = config.linkCode,
+              let web = URL(string: "https://t.me/\(config.botUsername)?start=\(code)") else { return nil }
+        return ("tg://resolve?domain=\(config.botUsername)&start=\(code)", web)
     }
 
     // MARK: Lifecycle
@@ -298,7 +321,8 @@ final class TelegramBot {
     func start(bootedAt boot: Date?, state: PowerState) {
         guard let config else { return }
         if let session = config.session, session.closingText != nil || !state.sleepDisabled {
-            let reason = session.endReason ?? ((boot.map { $0 > session.start } ?? false) ? .restart : .crash)
+            let rebooted = boot.map { $0 > session.start } ?? false
+            let reason = session.endReason ?? (rebooted ? .unexpectedRestart : .crash)
             let text = session.closingText ?? TelegramText.closed(reason, state: state)
             if session.closingText == nil {
                 self.config?.session?.closingText = text
@@ -316,8 +340,8 @@ final class TelegramBot {
         pollTask = Task { await poll() }
     }
 
-    /// Checks the token with Telegram, saves it and returns the link to tap Start.
-    func connect(token raw: String) async throws -> URL {
+    /// Checks the token with Telegram and saves it. `startLinks` then open the chat to tap Start.
+    func connect(token raw: String) async throws {
         let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard token.range(of: #"^[0-9]+:[A-Za-z0-9_-]{30,}$"#, options: .regularExpression) != nil else {
             throw TelegramAPI.Failure(
@@ -352,7 +376,6 @@ final class TelegramBot {
         config = TelegramConfig(token: token, botUsername: username, chatID: nil, linkCode: code, session: nil)
         config?.save()
         pollTask = Task { await poll() }
-        return startLink!
     }
 
     /// Leaves the chat in a clean state, then forgets the bot. A session still running gets a last message
@@ -368,12 +391,7 @@ final class TelegramBot {
         pollTask?.cancel()
         pollTask = nil
         await drain(timeout: 5)
-        let stuck = outbox.contains { item in
-            switch item.kind {
-            case .closing, .farewell: return true
-            case .opening, .notice, .reply: return false
-            }
-        }
+        let stuck = outbox.contains(where: \.endsSession)
         let problem = stuck ? (sendProblem ?? "Telegram could not be reached in time, the chat keeps its previous message.") : nil
         stop()
         TelegramConfig.delete()
@@ -405,14 +423,14 @@ final class TelegramBot {
 
     // MARK: Session
 
-    /// Lines the chat up with the real state: an opening message once stay awake is on,
+    /// Lines the chat up with the real state: an opening message once Pauline is on,
     /// a closing one when it went off without Pauline closing it (from Terminal, for example).
     func sync(_ state: PowerState) {
         guard isLinked, !leaving else { return }
         if state.sleepDisabled {
             if activeStart == nil {
                 let start = Date()
-                enqueue(Outgoing(kind: .opening(start), text: TelegramText.on(state), button: start))
+                enqueue(Outgoing(kind: .opening(start), text: TelegramText.on(state), offButton: start))
             }
         } else if activeStart != nil {
             close(.elsewhere, state: state)
@@ -435,10 +453,10 @@ final class TelegramBot {
         enqueue(Outgoing(kind: .closing(start), text: text))
     }
 
-    /// A reminder or the charging message, with an Allow sleep button when asked.
-    func notify(_ text: String, allowSleepButton: Bool) {
+    /// A reminder, the charging message or a warning, with a Turn Pauline off button when asked.
+    func notify(_ text: String, offButton: Bool) {
         guard isLinked, !leaving, let start = activeStart else { return }
-        enqueue(Outgoing(kind: .notice, text: text, button: allowSleepButton ? start : nil))
+        enqueue(Outgoing(kind: .notice, text: text, offButton: offButton ? start : nil))
     }
 
     func reply(_ text: String) {
@@ -470,6 +488,12 @@ final class TelegramBot {
 
     // MARK: Outbox
 
+    /// Reminders and replies older than this are dropped rather than sent late.
+    private static let staleAfter: TimeInterval = 120
+    /// Retries start after `firstRetry` seconds and double up to `longRetry`, the wait for errors that last.
+    private static let firstRetry = 5
+    private static let longRetry = 60
+
     private func enqueue(_ item: Outgoing) {
         outbox.append(item)
         if item.session != nil {
@@ -482,11 +506,11 @@ final class TelegramBot {
     }
 
     private func runOutbox(_ generation: Int) async {
-        var delay = 5
+        var delay = Self.firstRetry
         while generation == self.generation, !Task.isCancelled,
               let item = outbox.first, let config, let chatID = config.chatID {
             let age = Date().timeIntervalSince(item.created)
-            if item.session == nil, age > 120 {
+            if item.session == nil, age > Self.staleAfter {
                 outbox.removeFirst()
                 continue
             }
@@ -498,8 +522,8 @@ final class TelegramBot {
                 self.config?.save()
             }
 
-            let keyboard = item.button.map {
-                TelegramAPI.Keyboard(inlineKeyboard: [[.init(text: TelegramText.allowSleepButton, callbackData: "off:\(Int($0.timeIntervalSince1970))")]])
+            let keyboard = item.offButton.map {
+                TelegramAPI.Keyboard(inlineKeyboard: [[.init(text: TelegramText.offButton, callbackData: Self.offCallback($0))]])
             }
             let message = TelegramAPI.SendMessage(chatId: chatID, text: item.text, replyMarkup: keyboard)
             sending = item.id
@@ -516,14 +540,14 @@ final class TelegramBot {
 
             guard let failure else {
                 sendProblem = nil
-                delay = 5
+                delay = Self.firstRetry
                 outbox.removeFirst()
                 sent(item)
                 continue
             }
-            sendProblem = Self.problem(failure) ?? sendProblem
+            sendProblem = Self.lastingProblem(for: failure) ?? sendProblem
             // close() spared this reminder only because it was in flight. It failed, and its session is over.
-            if item.isNotice, outbox.contains(where: { $0.session != nil && !$0.isOpening }) {
+            if item.isNotice, outbox.contains(where: \.endsSession) {
                 outbox.removeFirst()
                 continue
             }
@@ -538,11 +562,11 @@ final class TelegramBot {
                 outbox.removeFirst()
                 continue
             }
-            let wait = failure.retryAfter ?? (lasting ? 60 : (drains > 0 ? 1 : delay))
+            let wait = failure.retryAfter ?? (lasting ? Self.longRetry : (drains > 0 ? 1 : delay))
             if await backoff(seconds: wait, interruptible: failure.retryAfter == nil) {
-                delay = 5
+                delay = Self.firstRetry
             } else if failure.retryAfter == nil {
-                delay = min(delay * 2, 60)
+                delay = min(delay * 2, Self.longRetry)
             }
         }
         if generation == self.generation {
@@ -585,7 +609,12 @@ final class TelegramBot {
         }
     }
 
-    private static func problem(_ failure: TelegramAPI.Failure) -> String? {
+    /// The data of an off button, tied to the session it was sent in.
+    private static func offCallback(_ session: Date) -> String {
+        "off:\(Int(session.timeIntervalSince1970))"
+    }
+
+    private static func lastingProblem(for failure: TelegramAPI.Failure) -> String? {
         switch failure.code {
         case 401?, 404?: return "Telegram: the bot token no longer works, connect again"
         case 403?: return "Telegram: the bot is blocked, open its chat and tap Restart"
@@ -597,29 +626,29 @@ final class TelegramBot {
     // MARK: Polling
 
     private func poll() async {
-        var delay = 5
+        var delay = Self.firstRetry
         while !Task.isCancelled, let config {
             do {
                 let request = TelegramAPI.GetUpdates(offset: offset, timeout: 50, allowedUpdates: ["message", "callback_query"])
                 let updates: [TelegramAPI.Update] = try await TelegramAPI(token: config.token)
                     .call("getUpdates", request, timeout: 65)
                 pollProblem = nil
-                delay = 5
+                delay = Self.firstRetry
                 for update in updates where !Task.isCancelled {
                     offset = update.updateId + 1
                     handle(update)
                 }
             } catch {
                 let failure = error as? TelegramAPI.Failure
-                pollProblem = failure.flatMap(Self.problem) ?? pollProblem
-                // A dead token or a conflict will not fix itself in 5 s: ask less often.
+                pollProblem = failure.flatMap { Self.lastingProblem(for: $0) } ?? pollProblem
+                // A dead token or a conflict will not fix itself on the first retry: ask less often.
                 let wait: Int
                 switch failure?.code {
-                case 401?, 404?: wait = 60
+                case 401?, 404?: wait = Self.longRetry
                 case 409?: wait = 30
                 default:
                     wait = failure?.retryAfter ?? delay
-                    delay = min(delay * 2, 60)
+                    delay = min(delay * 2, Self.longRetry)
                 }
                 try? await Task.sleep(for: .seconds(wait))
             }
@@ -634,8 +663,7 @@ final class TelegramBot {
                 answer(query.id, nil)
                 return
             }
-            let session = query.data.flatMap { $0.hasPrefix("off:") ? Int($0.dropFirst(4)) : nil }
-            if let session, let active = activeStart, session == Int(active.timeIntervalSince1970) {
+            if let active = activeStart, query.data == Self.offCallback(active) {
                 answer(query.id, nil)
                 onCommand?(.off)
             } else {
@@ -653,11 +681,7 @@ final class TelegramBot {
             if command == "/start", words.count == 2, String(words[1]) == config.linkCode {
                 link(message.chat.id)
             } else {
-                let notice = TelegramAPI.SendMessage(chatId: message.chat.id, text: TelegramText.useTheLink, replyMarkup: nil)
-                let token = config.token
-                Task {
-                    let _: TelegramAPI.Ignored? = try? await TelegramAPI(token: token).call("sendMessage", notice)
-                }
+                fireAndForget("sendMessage", TelegramAPI.SendMessage(chatId: message.chat.id, text: TelegramText.useTheLink, replyMarkup: nil))
             }
             return
         }
@@ -674,7 +698,7 @@ final class TelegramBot {
                 reply(TelegramText.alreadyOff)
                 return
             }
-            // Typed before stay awake was turned on again: it was meant for the previous session.
+            // Typed before Pauline was turned on again: it was meant for the previous session.
             // 10 s of slack for the gap between Telegram's clock and the Mac's.
             if sentAt.addingTimeInterval(10) < active {
                 reply(TelegramText.lateOff)
@@ -695,33 +719,19 @@ final class TelegramBot {
     }
 
     private func answer(_ queryID: String, _ text: String?) {
-        guard let token = config?.token else { return }
-        Task {
-            let _: TelegramAPI.Ignored? = try? await TelegramAPI(token: token)
-                .call("answerCallbackQuery", TelegramAPI.AnswerCallback(callbackQueryId: queryID, text: text))
-        }
+        fireAndForget("answerCallbackQuery", TelegramAPI.AnswerCallback(callbackQueryId: queryID, text: text))
     }
 
     private func setCommands() {
+        let commands = TelegramText.commands.map { TelegramAPI.BotCommand(command: $0.command, description: $0.description) }
+        fireAndForget("setMyCommands", TelegramAPI.SetCommands(commands: commands))
+    }
+
+    /// A request outside the outbox, for calls that do not matter if they are lost.
+    private func fireAndForget<Body: Encodable & Sendable>(_ method: String, _ body: Body) {
         guard let token = config?.token else { return }
-        let commands = TelegramText.commands.map { TelegramAPI.Command(command: $0.command, description: $0.description) }
         Task {
-            let _: TelegramAPI.Ignored? = try? await TelegramAPI(token: token)
-                .call("setMyCommands", TelegramAPI.SetCommands(commands: commands))
+            let _: TelegramAPI.Ignored? = try? await TelegramAPI(token: token).call(method, body)
         }
     }
-}
-
-/// The Start link as a QR code, for a phone when Telegram is not installed on the Mac.
-func qrCode(for url: URL, size: CGFloat) -> NSImage? {
-    let filter = CIFilter.qrCodeGenerator()
-    filter.message = Data(url.absoluteString.utf8)
-    filter.correctionLevel = "M"
-    guard let output = filter.outputImage else { return nil }
-    let scale = size / output.extent.width
-    let scaled = output.samplingNearest().transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-    let rep = NSCIImageRep(ciImage: scaled)
-    let image = NSImage(size: rep.size)
-    image.addRepresentation(rep)
-    return image
 }

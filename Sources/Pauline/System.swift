@@ -17,11 +17,10 @@ enum SleepSetting {
 
     /// powerd applies a change a moment after pmset returns. Waits up to `timeout` seconds for the flag
     /// to read `disabled`, usually a few milliseconds.
-    static func waitForFlag(disabled: Bool, timeout: Double = 2) {
-        var waited = 0.0
-        while isSleepDisabled != disabled, waited < timeout {
+    static func waitForFlag(disabled: Bool, timeout: TimeInterval = 2) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while isSleepDisabled != disabled, Date() < deadline {
             usleep(20_000)
-            waited += 0.02
         }
     }
 
@@ -48,8 +47,8 @@ enum SleepSetting {
 }
 
 enum PowerSource {
-    /// Whether the Mac runs on battery, whether the internal battery charges, its charge if there is one,
-    /// and the minutes left until it is full.
+    /// Whether the Mac runs on battery and, when it has an internal battery, its charge, whether it charges,
+    /// whether charging has ended, and the minutes left until full or empty.
     static func read() -> (onBattery: Bool, charging: Bool, percent: Int?, minutesToFull: Int?, minutesToEmpty: Int?, complete: Bool) {
         guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() else { return (false, false, nil, nil, nil, false) }
         let providing = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() as String?
@@ -142,15 +141,12 @@ enum Shell {
         posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0)
         posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0)
 
-        // Pauline ignores SIGTERM, SIGINT and SIGHUP to quit cleanly. Children get the defaults back.
+        // Pauline ignores the signals it handles itself. Children start with every signal at its default.
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
         var defaultSignals = sigset_t()
-        sigemptyset(&defaultSignals)
-        for code in [SIGTERM, SIGINT, SIGHUP] {
-            sigaddset(&defaultSignals, code)
-        }
+        sigfillset(&defaultSignals)
         posix_spawnattr_setsigdefault(&attributes, &defaultSignals)
         posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSIGDEF))
 

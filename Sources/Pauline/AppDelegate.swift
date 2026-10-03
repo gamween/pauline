@@ -7,13 +7,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let telegram = TelegramBot()
     private var safety = Safety()
     private var notifier = Notifier()
-    private var permitted = true
-    /// While a closing message is on its way, a closed Mac waits for it before sleeping (10 s at most).
+    /// The last pmset change went through. False means the sudoers rule from install.sh is missing.
+    private var pmsetAllowed = true
+    /// While a closing message is on its way, a closed Mac waits for it before sleeping, `sleepHoldLimit` at most.
     private var sleepHeldUntil: Date?
-    /// Why Pauline is quitting, for the closing message: set by a signal or a shutdown.
+    private static let sleepHoldLimit: TimeInterval = 10
+    /// Why Pauline is quitting, for the closing message: set by a signal, a power off notice or the quit event macOS sends.
     private var quitReason = CloseReason.quit
     private var isTerminating = false
-    /// "Could not turn stay awake off" goes out once per session, not every 5 s.
+    /// `TelegramText.couldNotTurnOff` goes out once per session, not on every check.
     private var warnedCouldNotTurnOff = false
     /// Pauline closed the session during this check: the flag it just changed may still read the old value.
     private var closedThisCheck = false
@@ -27,6 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return Policy(batteryFloor: floor ?? Policy.defaultBatteryFloor)
     }
 
+    // MARK: Lifecycle
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         installEditMenu()
         // AppKit remembers a hidden status item across launches: always show the switch.
@@ -36,14 +40,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.action = #selector(buttonClicked)
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-        restoreSleepOnSignals()
+        quitOnSignals()
         let workspace = NSWorkspace.shared.notificationCenter
         workspace.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
         workspace.addObserver(self, selector: #selector(willPowerOff), name: NSWorkspace.willPowerOffNotification, object: nil)
 
         // Fail safe: every launch gives sleep back, so a crash, a force quit or a restart
         // (the flag survives reboots) never leaves the Mac stuck awake. Doubles as a permission check.
-        safety.policy = policy
         let actions = safety.launch(PowerState.current())
         perform(actions.filter { $0 == .restoreSleep })
 
@@ -55,7 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A closed Mac waits for that closing message before it sleeps.
         if actions.contains(.sleepNow) {
             if telegram.hasPendingMessages {
-                sleepHeldUntil = Date().addingTimeInterval(10)
+                sleepHeldUntil = Date().addingTimeInterval(Self.sleepHoldLimit)
                 releaseHeldSleepAfterDrain()
             } else {
                 perform([.sleepNow])
@@ -81,20 +84,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             quitReason = reason
         }
         let state = PowerState.current()
-        if state.sleepDisabled {
-            permitted = SleepSetting.setSleepDisabled(false)
-        }
-        if state.sleepDisabled, !permitted {
-            // Still awake: say so, and keep the session on disk for the next launch to close as a quit.
+        if state.sleepDisabled, !SleepSetting.setSleepDisabled(false) {
+            // Still on: say so, and keep the session on disk for the next launch to close with this reason.
             telegram.keepOpenAfterQuit(quitReason)
-            telegram.notify(TelegramText.quitStillAwake, allowSleepButton: false)
+            telegram.notify(TelegramText.quitStillOn, offButton: false)
         } else {
             telegram.close(quitReason, state: state)
         }
         guard telegram.hasPendingMessages else { return .terminateNow }
 
         Task {
-            // launchd sends SIGKILL a few seconds after SIGTERM.
+            // Well under launchd's ExitTimeOut (15 s, set by install.sh), after which it sends SIGKILL.
             await telegram.drain(timeout: quitReason == .stopped ? 4 : 5)
             NSApp.reply(toApplicationShouldTerminate: true)
         }
@@ -119,6 +119,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The menu bar never shows it, but without an Edit menu Cmd+V cannot paste the bot token.
+    private func installEditMenu() {
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let editItem = NSMenuItem()
+        editItem.submenu = edit
+        let main = NSMenu()
+        main.addItem(editItem)
+        NSApp.mainMenu = main
+    }
+
+    /// launchd stops agents with SIGTERM at logout or on reinstall. Quit cleanly so sleep comes back
+    /// and the session gets its closing message.
+    private func quitOnSignals() {
+        for code in [SIGTERM, SIGINT, SIGHUP] {
+            signal(code, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: code, queue: .main)
+            source.setEventHandler { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, !self.isTerminating else { return }
+                    if self.quitReason == .quit {
+                        self.quitReason = .stopped
+                    }
+                    // Not from this main queue block: AppKit would wait for the closing message inside it,
+                    // and the main queue (the send included) could not run until it returned.
+                    RunLoop.main.perform(inModes: [.common]) {
+                        MainActor.assumeIsolated { NSApp.terminate(nil) }
+                    }
+                }
+            }
+            source.resume()
+            signalSources.append(source)
+        }
+    }
+
     // MARK: Checks
 
     @objc private func check() {
@@ -131,17 +169,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for notice in notifier.check(reading) {
             switch notice {
             case .batteryLow:
-                telegram.notify(TelegramText.on(reading), allowSleepButton: true)
+                telegram.notify(TelegramText.on(reading), offButton: true)
             case .chargingDone:
-                telegram.notify(TelegramText.on(reading), allowSleepButton: false)
+                telegram.notify(TelegramText.on(reading), offButton: false)
             }
         }
 
         let actions = safety.check(reading)
-        if reading.sleepDisabled, actions.contains(.restoreSleep) {
+        if actions.contains(.restoreSleep), let danger = policy.danger(reading) {
             // Pauline gives sleep back on its own: battery floor or heat.
-            let reason: CloseReason = policy.danger(reading) == .overheating ? .overheating : .lowBattery
-            giveSleepBack(actions, reason: reason, state: reading)
+            giveSleepBack(actions, reason: CloseReason(danger), state: reading)
         } else {
             perform(actions)
         }
@@ -157,24 +194,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         render(state)
     }
 
-    /// The one way Pauline turns stay awake off: switch, menu, Telegram, battery floor or heat.
+    /// Turns Pauline off while it runs: switch or menu, Telegram, battery floor or heat.
     /// Sleep comes back right away; a closed Mac waits for the closing message before it sleeps.
     private func giveSleepBack(_ actions: [Action], reason: CloseReason, state: PowerState) {
         let sleeping = actions.contains(.sleepNow)
         if sleeping, telegram.isLinked {
-            sleepHeldUntil = Date().addingTimeInterval(10)
+            sleepHeldUntil = Date().addingTimeInterval(Self.sleepHoldLimit)
         }
         perform(actions)
 
-        guard permitted else {
-            // pmset refused: stay awake is still on, say so instead of closing the session.
+        guard pmsetAllowed else {
+            // pmset refused: Pauline is still on, say so instead of closing the session.
             // Every /off gets its answer; the automatic tries warn once.
             sleepHeldUntil = nil
             if reason == .telegram {
                 telegram.reply(TelegramText.couldNotTurnOff)
             } else if !warnedCouldNotTurnOff {
                 warnedCouldNotTurnOff = true
-                telegram.notify(TelegramText.couldNotTurnOff, allowSleepButton: false)
+                telegram.notify(TelegramText.couldNotTurnOff, offButton: false)
             }
             return
         }
@@ -188,7 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func releaseHeldSleepAfterDrain() {
         Task {
-            await telegram.drain(timeout: 10)
+            await telegram.drain(timeout: Self.sleepHoldLimit)
             releaseHeldSleep()
         }
     }
@@ -197,8 +234,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for action in actions {
             switch action {
             case .restoreSleep:
-                permitted = SleepSetting.setSleepDisabled(false)
-                if permitted {
+                pmsetAllowed = SleepSetting.setSleepDisabled(false)
+                if pmsetAllowed {
                     // powerd applies it a moment later: until then sleepnow is refused and the flag reads stale.
                     SleepSetting.waitForFlag(disabled: false)
                 }
@@ -285,19 +322,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 alert(refusal.title, refusal.message)
                 return
             }
-            permitted = SleepSetting.setSleepDisabled(true)
-            if permitted {
+            pmsetAllowed = SleepSetting.setSleepDisabled(true)
+            if pmsetAllowed {
                 SleepSetting.waitForFlag(disabled: true)
                 telegram.sync(PowerState.current())
             }
         }
-        if !permitted {
+        if !pmsetAllowed {
             alert(
                 "Pauline is not allowed to change sleep",
                 "Run ./install.sh from the Pauline folder again. It asks for your password once to allow it."
             )
         }
         render(PowerState.current())
+    }
+
+    @objc private func quit() {
+        guard !isTerminating else { return }
+        NSApp.terminate(nil)
     }
 
     private func showMenu() {
@@ -308,7 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let battery = StatusText.battery(state, policy: policy) {
             menu.addItem(info(battery))
         }
-        if !permitted {
+        if !pmsetAllowed {
             menu.addItem(info("Not allowed yet, run ./install.sh"))
         }
         menu.addItem(.separator())
@@ -351,11 +393,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Telegram setup
 
-    @objc private func quit() {
-        guard !isTerminating else { return }
-        NSApp.terminate(nil)
-    }
-
     @objc private func connectTelegram() {
         guard !isTerminating else { return }
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
@@ -381,7 +418,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let token = field.stringValue
             Task {
                 do {
-                    _ = try await telegram.connect(token: token)
+                    try await telegram.connect(token: token)
                     afterThisTask { $0.openBotChat() }
                 } catch {
                     let message = error.localizedDescription
@@ -398,9 +435,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Opens the bot chat with the Start link, and shows it as a QR code for a phone.
     @objc private func openBotChat() {
-        guard !isTerminating, let link = telegram.startLink, let bot = telegram.botUsername,
-              let code = link.query?.replacingOccurrences(of: "start=", with: "") else { return }
-        open(telegramApp: "tg://resolve?domain=\(bot)&start=\(code)", web: link.absoluteString)
+        guard !isTerminating, let links = telegram.startLinks, let bot = telegram.botUsername else { return }
+        open(telegramApp: links.app, web: links.web.absoluteString)
 
         let alert = NSAlert()
         alert.messageText = "Tap Start in Telegram"
@@ -409,7 +445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             Telegram is on your phone only? Scan this code with it.
             """
-        if let image = qrCode(for: link, size: 180) {
+        if let image = qrCode(for: links.web, size: 180) {
             let view = NSImageView(frame: NSRect(x: 0, y: 0, width: 180, height: 180))
             view.image = image
             alert.accessoryView = view
@@ -438,6 +474,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: Alerts
+
     /// Runs a modal alert outside the current MainActor job. A modal run from inside a Task or a
     /// main queue block would freeze every other MainActor job, Telegram polling included, until it closes.
     private func afterThisTask(_ body: @escaping @MainActor (AppDelegate) -> Void) {
@@ -455,45 +493,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.messageText = title
         alert.informativeText = message
         alert.runModal()
-    }
-
-    // MARK: Lifecycle
-
-    /// The menu bar never shows it, but without an Edit menu Cmd+V cannot paste the bot token.
-    private func installEditMenu() {
-        let edit = NSMenu(title: "Edit")
-        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        let editItem = NSMenuItem()
-        editItem.submenu = edit
-        let main = NSMenu()
-        main.addItem(editItem)
-        NSApp.mainMenu = main
-    }
-
-    /// launchd stops agents with SIGTERM at logout or on reinstall. Quit cleanly so sleep comes back
-    /// and the session gets its closing message.
-    private func restoreSleepOnSignals() {
-        for code in [SIGTERM, SIGINT, SIGHUP] {
-            signal(code, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: code, queue: .main)
-            source.setEventHandler { [weak self] in
-                MainActor.assumeIsolated {
-                    guard let self, !self.isTerminating else { return }
-                    if self.quitReason == .quit {
-                        self.quitReason = .stopped
-                    }
-                    // Not from this main queue block: AppKit would wait for the closing message inside it,
-                    // and the main queue (the send included) could not run until it returned.
-                    RunLoop.main.perform(inModes: [.common]) {
-                        MainActor.assumeIsolated { NSApp.terminate(nil) }
-                    }
-                }
-            }
-            source.resume()
-            signalSources.append(source)
-        }
     }
 }
