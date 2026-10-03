@@ -1,12 +1,12 @@
 import AppKit
 
-/// The menu bar icon: the Mac's own Apple emoji in one ink, black on a light menu bar and white on a dark one.
-/// The Apple Color Emoji font draws the emoji at launch; its shading turns into the ink's opacity.
+/// The menu bar icon: two Apple emoji in one ink, black on a light menu bar and white on a dark one.
+/// The Apple Color Emoji font of the Mac draws them at launch, and their shading turns into the ink's opacity.
 enum EmojiIcon {
     /// Pauline off, the Mac sleeps normally: woman getting a massage.
-    static let off = make("\u{1F486}\u{200D}\u{2640}\u{FE0F}", description: "Pauline off")
+    @MainActor static let off = make("\u{1F486}\u{200D}\u{2640}\u{FE0F}", description: "Pauline off")
     /// Pauline on, the Mac stays awake: woman technologist.
-    static let on = make("\u{1F469}\u{200D}\u{1F4BB}", description: "Pauline on")
+    @MainActor static let on = make("\u{1F469}\u{200D}\u{1F4BB}", description: "Pauline on")
 
     /// Apple Color Emoji's largest bitmap is 160 px: drawn at that size, the icon stays sharp at 18 pt on Retina.
     private static let side = 160
@@ -38,9 +38,10 @@ enum EmojiIcon {
         )!
         let font = NSFont(name: "AppleColorEmoji", size: CGFloat(side) * 0.9)!
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: emoji, attributes: [.font: font]))
-        let ink = CTLineGetImageBounds(line, bitmap)
+        // The glyph's square box, the same for both emoji, so they share one frame and baseline.
+        let box = CTLineGetImageBounds(line, bitmap)
         bitmap.textPosition = CGPoint(
-            x: (CGFloat(side) - ink.width) / 2 - ink.minX, y: (CGFloat(side) - ink.height) / 2 - ink.minY
+            x: (CGFloat(side) - box.width) / 2 - box.minX, y: (CGFloat(side) - box.height) / 2 - box.minY
         )
         CTLineDraw(line, bitmap)
         return Array(UnsafeBufferPointer(start: bitmap.data!.assumingMemoryBound(to: UInt8.self), count: side * side * 4))
