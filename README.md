@@ -6,7 +6,7 @@ Close the lid and your downloads, builds, renders and coding agents (Claude Code
 
 ## How it works
 
-1. Click the cup in the menu bar. It fills up.
+1. Click the switch in the menu bar. It turns on.
 2. Pauline runs `pmset -a disablesleep 1`, the macOS setting that keeps a Mac awake when the lid closes.
 3. Click again: Pauline runs `pmset -a disablesleep 0` and normal sleep is back.
 
@@ -37,13 +37,17 @@ Keep the `pauline` folder: you update with `git pull && ./install.sh` and uninst
 
 | Action | Result |
 | --- | --- |
-| Click the cup | Stay awake with the lid closed, or sleep normally again |
-| Right-click the cup | Status, battery, toggle and Quit |
+| Click the switch | Stay awake with the lid closed, or sleep normally again |
+| Right-click the switch | Status, battery, toggle and Quit |
 
-| Icon | Meaning |
+<p align="center">
+  <img src="docs/switch.png" width="180" alt="The Pauline switch, off on the left and on on the right, in light and dark menu bars" />
+</p>
+
+| Switch | Meaning |
 | --- | --- |
-| Empty cup | Normal sleep |
-| Full cup | Awake, even with the lid closed |
+| Off: outline, knob on the left | Normal sleep |
+| On: filled, knob on the right | Awake, even with the lid closed |
 
 After Quit, open Pauline again from Applications or Spotlight.
 
