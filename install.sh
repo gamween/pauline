@@ -86,6 +86,9 @@ cat > "$agent" <<PLIST
 		<key>SuccessfulExit</key>
 		<false/>
 	</dict>
+	<!-- Time to send the closing Telegram message before launchd forces the quit. -->
+	<key>ExitTimeOut</key>
+	<integer>15</integer>
 	<key>LimitLoadToSessionType</key>
 	<string>Aqua</string>
 	<key>ProcessType</key>
@@ -109,4 +112,4 @@ done
 
 printf '\nDone. Pauline is the switch in your menu bar.\n'
 printf '  Click        stay awake with the lid closed, click again to sleep normally\n'
-printf '  Right-click  status, battery and Quit\n'
+printf '  Right-click  status, battery, Telegram and Quit\n'

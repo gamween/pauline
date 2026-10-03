@@ -8,6 +8,13 @@ public struct PowerState: Equatable, Sendable {
     public var batteryCharging: Bool
     /// Internal battery charge from 0 to 100, nil on Macs without a battery.
     public var batteryPercent: Int?
+    /// Minutes until the battery is full while it charges, nil when macOS has no estimate.
+    public var minutesToFull: Int?
+    /// Minutes of battery left while unplugged, nil when macOS has no estimate yet.
+    public var minutesToEmpty: Int?
+    /// Charging has really ended: the battery is full, or held at 80% by Optimized Battery Charging.
+    /// False when charging only pauses, for example on an adapter too weak for the load.
+    public var chargeComplete: Bool
     public var lidClosed: Bool
     /// The built-in screen is lit (online, active and not asleep).
     public var builtInDisplayAwake: Bool
@@ -20,6 +27,9 @@ public struct PowerState: Equatable, Sendable {
         onBattery: Bool = false,
         batteryCharging: Bool = false,
         batteryPercent: Int? = nil,
+        minutesToFull: Int? = nil,
+        minutesToEmpty: Int? = nil,
+        chargeComplete: Bool = false,
         lidClosed: Bool = false,
         builtInDisplayAwake: Bool = false,
         externalDisplayConnected: Bool = false,
@@ -29,6 +39,9 @@ public struct PowerState: Equatable, Sendable {
         self.onBattery = onBattery
         self.batteryCharging = batteryCharging
         self.batteryPercent = batteryPercent
+        self.minutesToFull = minutesToFull
+        self.minutesToEmpty = minutesToEmpty
+        self.chargeComplete = chargeComplete
         self.lidClosed = lidClosed
         self.builtInDisplayAwake = builtInDisplayAwake
         self.externalDisplayConnected = externalDisplayConnected
@@ -36,7 +49,10 @@ public struct PowerState: Equatable, Sendable {
     }
 
     /// Closed lid and no monitor: nobody is using this Mac, it may well be in a bag.
-    var closedWithoutExternalDisplay: Bool { lidClosed && !externalDisplayConnected }
+    public var closedWithoutExternalDisplay: Bool { lidClosed && !externalDisplayConnected }
+
+    /// The battery loses charge: on battery, or plugged into an adapter that does not charge it.
+    public var draining: Bool { onBattery || !batteryCharging }
 }
 
 /// What the app must do after a check.
@@ -61,7 +77,8 @@ public struct Policy: Equatable, Sendable {
     /// 0 disables the floor.
     public var batteryFloor: Int
 
-    public static let defaultBatteryFloor = 20
+    /// A last resort: the Telegram reminders at 30, 20 and 10% let you turn it off yourself before.
+    public static let defaultBatteryFloor = 5
 
     public init(batteryFloor: Int = Policy.defaultBatteryFloor) {
         self.batteryFloor = min(max(batteryFloor, 0), 100)
@@ -72,9 +89,7 @@ public struct Policy: Equatable, Sendable {
     /// batteries, so Pauline has to watch both.
     public func danger(_ state: PowerState) -> Danger? {
         if state.overheating { return .overheating }
-        // Draining: on battery, or plugged into an adapter too weak to charge.
-        let draining = state.onBattery || !state.batteryCharging
-        if batteryFloor > 0, draining, let percent = state.batteryPercent, percent <= batteryFloor {
+        if batteryFloor > 0, state.draining, let percent = state.batteryPercent, percent <= batteryFloor {
             return .lowBattery
         }
         return nil
@@ -98,6 +113,13 @@ public struct Safety: Sendable {
     public mutating func launch(_ state: PowerState) -> [Action] {
         previous = state
         guard state.sleepDisabled, state.closedWithoutExternalDisplay else { return [.restoreSleep] }
+        sleepPending = true
+        return [.restoreSleep, .sleepNow]
+    }
+
+    /// Stay awake is turned off by hand, from the menu or Telegram. A closed Mac then goes to sleep.
+    public mutating func allowSleep(_ state: PowerState) -> [Action] {
+        guard state.closedWithoutExternalDisplay else { return [.restoreSleep] }
         sleepPending = true
         return [.restoreSleep, .sleepNow]
     }

@@ -44,7 +44,7 @@ struct BatteryFloorTests {
 
 @Suite("Giving sleep back")
 struct GivingSleepBackTests {
-    let lowOnDesk = PowerState(sleepDisabled: true, onBattery: true, batteryPercent: 12)
+    let lowOnDesk = PowerState(sleepDisabled: true, onBattery: true, batteryPercent: 4)
 
     @Test func restoresSleepWithTheLidOpen() {
         var safety = Safety()
@@ -186,5 +186,24 @@ struct StatusTextTests {
     @Test func explainsRefusals() {
         #expect(StatusText.refusal(.lowBattery, policy: policy).message.contains("20%"))
         #expect(StatusText.refusal(.overheating, policy: policy).title == "Mac too hot")
+    }
+}
+
+@Suite("Manual off")
+struct ManualOffTests {
+    @Test func aClosedMacGoesToSleep() {
+        var safety = Safety()
+        #expect(safety.allowSleep(PowerState(sleepDisabled: true, lidClosed: true)) == [.restoreSleep, .sleepNow])
+        #expect(safety.sleepPending)
+    }
+
+    @Test func anOpenMacJustSleepsNormally() {
+        var safety = Safety()
+        #expect(safety.allowSleep(PowerState(sleepDisabled: true)) == [.restoreSleep])
+        #expect(!safety.sleepPending)
+    }
+
+    @Test func theDefaultFloorIsALastResort() {
+        #expect(Policy().batteryFloor == 5)
     }
 }

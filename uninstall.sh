@@ -25,9 +25,22 @@ pkill -x Pauline 2>/dev/null || true
 # Pauline gives sleep back when it quits. This is a second safety while the rule still exists.
 sudo -k -n /usr/bin/pmset -a disablesleep 0 2>/dev/null || true
 
+# Pauline sends the Telegram closing message as it quits. If it could not (offline), try once more.
+config="$HOME/Library/Application Support/Pauline/telegram.json"
+if [ -f "$config" ] && plutil -extract session json -o /dev/null "$config" >/dev/null 2>&1; then
+  token="$(plutil -extract token raw -o - "$config" 2>/dev/null || true)"
+  chat="$(plutil -extract chatID raw -o - "$config" 2>/dev/null || true)"
+  text="$(plutil -extract session.closingText raw -o - "$config" 2>/dev/null || echo "Stay awake is off. Pauline was uninstalled.")"
+  if [ -n "$token" ] && [ -n "$chat" ]; then
+    curl -s -m 5 -o /dev/null "https://api.telegram.org/bot$token/sendMessage" \
+      --data-urlencode "chat_id=$chat" --data-urlencode "text=$text" || true
+  fi
+fi
+
 rm -f "$agent"
 rm -rf "$app"
 defaults delete "$label" 2>/dev/null || true
+rm -rf "$HOME/Library/Application Support/Pauline"
 if [ -e "$rule" ]; then
   echo "macOS asks for your password to remove $rule."
   as_root "/bin/rm -f $rule"

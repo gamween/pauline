@@ -15,12 +15,13 @@ enum SleepSetting {
         Shell.run("/usr/bin/sudo", "-k", "-n", "/usr/bin/pmset", "-a", "disablesleep", disabled ? "1" : "0") == 0
     }
 
-    /// powerd applies the change a moment after pmset returns. Waits up to `timeout` seconds for it.
-    static func waitForSleepAllowed(timeout: Double = 2) {
+    /// powerd applies a change a moment after pmset returns. Waits up to `timeout` seconds for the flag
+    /// to read `disabled`, usually a few milliseconds.
+    static func waitForFlag(disabled: Bool, timeout: Double = 2) {
         var waited = 0.0
-        while isSleepDisabled, waited < timeout {
-            usleep(50_000)
-            waited += 0.05
+        while isSleepDisabled != disabled, waited < timeout {
+            usleep(20_000)
+            waited += 0.02
         }
     }
 
@@ -47,9 +48,10 @@ enum SleepSetting {
 }
 
 enum PowerSource {
-    /// Whether the Mac runs on battery, whether the internal battery charges, and its charge if there is one.
-    static func read() -> (onBattery: Bool, charging: Bool, percent: Int?) {
-        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() else { return (false, false, nil) }
+    /// Whether the Mac runs on battery, whether the internal battery charges, its charge if there is one,
+    /// and the minutes left until it is full.
+    static func read() -> (onBattery: Bool, charging: Bool, percent: Int?, minutesToFull: Int?, minutesToEmpty: Int?, complete: Bool) {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() else { return (false, false, nil, nil, nil, false) }
         let providing = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() as String?
         let sources = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] ?? []
 
@@ -62,8 +64,23 @@ enum PowerSource {
             percent = current * 100 / maximum
         }
         let charging = battery?[kIOPSIsChargingKey] as? Bool ?? false
-        return (providing == kIOPSBatteryPowerValue, charging, percent)
+        // -1 while macOS is still estimating, 0 when it does not apply (no time to empty while charging).
+        let minutesToFull = (battery?[kIOPSTimeToFullChargeKey] as? Int).flatMap { $0 >= 0 ? $0 : nil }
+        let minutesToEmpty = (battery?[kIOPSTimeToEmptyKey] as? Int).flatMap { $0 > 0 ? $0 : nil }
+        // "Is Charged" only appears once the battery is full.
+        let complete = battery?[kIOPSIsChargedKey] as? Bool ?? false
+            || battery?["Optimized Battery Charging Engaged"] as? Bool ?? false
+        return (providing == kIOPSBatteryPowerValue, charging, percent, minutesToFull, minutesToEmpty, complete)
     }
+}
+
+/// When the Mac last booted, to tell a crash of Pauline from a restart of the Mac.
+func bootTime() -> Date? {
+    var time = timeval()
+    var size = MemoryLayout<timeval>.size
+    var mib: [Int32] = [CTL_KERN, KERN_BOOTTIME]
+    guard sysctl(&mib, 2, &time, &size, nil, 0) == 0 else { return nil }
+    return Date(timeIntervalSince1970: TimeInterval(time.tv_sec))
 }
 
 enum Displays {
@@ -97,6 +114,9 @@ extension PowerState {
             onBattery: power.onBattery,
             batteryCharging: power.charging,
             batteryPercent: power.percent,
+            minutesToFull: power.minutesToFull,
+            minutesToEmpty: power.minutesToEmpty,
+            chargeComplete: power.complete,
             lidClosed: SleepSetting.isLidClosed,
             builtInDisplayAwake: displays.builtInAwake,
             externalDisplayConnected: displays.externalConnected,
