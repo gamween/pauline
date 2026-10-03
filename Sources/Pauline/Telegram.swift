@@ -235,8 +235,6 @@ final class TelegramBot {
         let kind: Kind
         let created = Date()
         let text: String
-        /// The closing text without "going to sleep" or "normal sleep is back", used when it leaves late.
-        var lateText: String?
         /// The session an Allow sleep button belongs to.
         var button: Date?
 
@@ -287,12 +285,11 @@ final class TelegramBot {
     // MARK: Lifecycle
 
     /// Starts listening. A session left open by a quit while offline, a crash or a restart gets its closing now.
-    func start(bootedAt boot: Date?, policy: Policy) {
+    func start(bootedAt boot: Date?, state: PowerState) {
         guard let config else { return }
         if let session = config.session {
             let text = session.closingText ?? TelegramText.closed(
-                (boot.map { $0 > session.start } ?? false) ? .restart : .crash,
-                start: session.start, end: nil, sleeping: nil, policy: policy
+                (boot.map { $0 > session.start } ?? false) ? .restart : .crash, state: state
             )
             enqueue(Outgoing(kind: .closing(session.start), text: text))
         }
@@ -372,35 +369,32 @@ final class TelegramBot {
 
     /// Lines the chat up with the real state: an opening message once stay awake is on,
     /// a closing one when it went off without Pauline closing it (from Terminal, for example).
-    func sync(_ state: PowerState, policy: Policy) {
+    func sync(_ state: PowerState) {
         guard isLinked else { return }
         if state.sleepDisabled {
             if activeStart == nil {
                 let start = Date()
-                enqueue(Outgoing(kind: .opening(start), text: TelegramText.started(state), button: start))
+                enqueue(Outgoing(kind: .opening(start), text: TelegramText.on(state), button: start))
             }
         } else if activeStart != nil {
-            close(.elsewhere, state: state, sleeping: false, policy: policy)
+            close(.elsewhere, state: state)
         }
     }
 
     /// Ends the session the chat sees as running, if any, with this reason.
-    /// - Parameter sleeping: whether a closed Mac goes to sleep now, nil when the Mac shuts down.
-    func close(_ reason: CloseReason, state: PowerState, sleeping: Bool?, policy: Policy) {
+    func close(_ reason: CloseReason, state: PowerState) {
         guard isLinked, let start = activeStart else { return }
         // Reminders still waiting are no longer true.
         outbox.removeAll { $0.isNotice && $0.id != sending }
         // Turned on and off before the opening was ever tried: nothing was announced, nothing to close.
         if dropUnannouncedOpening(start) { return }
 
-        let end = Date()
-        let text = TelegramText.closed(reason, start: start, end: end, sleeping: sleeping, policy: policy)
-        let late = TelegramText.closed(reason, start: start, end: end, sleeping: nil, policy: policy)
+        let text = TelegramText.closed(reason, state: state)
         if config?.session?.start == start {
-            config?.session?.closingText = late
+            config?.session?.closingText = text
             config?.save()
         }
-        enqueue(Outgoing(kind: .closing(start), text: text, lateText: late))
+        enqueue(Outgoing(kind: .closing(start), text: text))
     }
 
     /// A reminder or the charging message, with an Allow sleep button when asked.
@@ -462,11 +456,10 @@ final class TelegramBot {
                 self.config?.save()
             }
 
-            let text = age > 60 ? (item.lateText ?? item.text) : item.text
             let keyboard = item.button.map {
                 TelegramAPI.Keyboard(inlineKeyboard: [[.init(text: TelegramText.allowSleepButton, callbackData: "off:\(Int($0.timeIntervalSince1970))")]])
             }
-            let message = TelegramAPI.SendMessage(chatId: chatID, text: text, replyMarkup: keyboard)
+            let message = TelegramAPI.SendMessage(chatId: chatID, text: item.text, replyMarkup: keyboard)
             sending = item.id
             // Anything queued from now on, while the request is in flight, cuts the next wait short.
             retryNow = false
@@ -528,7 +521,7 @@ final class TelegramBot {
         outbox.first { item in
             if case .closing(let closing) = item.kind { return closing == start }
             return false
-        }?.lateText
+        }?.text
     }
 
     /// Erases the session once its closing or farewell went out.

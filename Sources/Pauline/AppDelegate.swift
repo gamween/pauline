@@ -41,7 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // A session a crash, a restart or an offline quit left open gets its closing message queued first.
         telegram.onCommand = { [weak self] command in self?.handle(command) }
-        telegram.start(bootedAt: bootTime(), policy: policy)
+        telegram.start(bootedAt: bootTime(), state: PowerState.current())
 
         // Fail safe: every launch gives sleep back, so a crash, a force quit or a restart
         // (the flag survives reboots) never leaves the Mac stuck awake. Doubles as a permission check.
@@ -74,7 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Still awake: say so, and keep the session on disk for the next launch to close.
             telegram.notify(TelegramText.quitStillAwake, allowSleepButton: false)
         } else {
-            telegram.close(quitReason, state: state, sleeping: quitReason == .shutdown ? nil : false, policy: policy)
+            telegram.close(quitReason, state: state)
         }
         guard telegram.hasPendingMessages else { return .terminateNow }
 
@@ -103,10 +103,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         for notice in notifier.check(reading) {
             switch notice {
-            case .batteryLow(let percent):
-                telegram.notify(TelegramText.reminder(percent: percent, state: reading, policy: policy), allowSleepButton: true)
-            case .chargingDone(let percent):
-                telegram.notify(TelegramText.chargingDone(percent: percent), allowSleepButton: false)
+            case .batteryLow:
+                telegram.notify(TelegramText.on(reading), allowSleepButton: true)
+            case .chargingDone:
+                telegram.notify(TelegramText.on(reading), allowSleepButton: false)
             }
         }
 
@@ -125,7 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Right after Pauline closed the session the flag may read stale: the next check reconciles.
         if !closedThisCheck {
-            telegram.sync(state, policy: policy)
+            telegram.sync(state)
         }
         render(state)
     }
@@ -150,7 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         warnedCouldNotTurnOff = false
         closedThisCheck = true
-        telegram.close(reason, state: state, sleeping: sleeping, policy: policy)
+        telegram.close(reason, state: state)
         if sleeping, telegram.isLinked {
             releaseHeldSleepAfterDrain()
         }
@@ -263,7 +263,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             permitted = SleepSetting.setSleepDisabled(true)
             if permitted {
                 SleepSetting.waitForFlag(disabled: true)
-                telegram.sync(PowerState.current(), policy: policy)
+                telegram.sync(PowerState.current())
             }
         }
         if !permitted {
@@ -398,7 +398,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func disconnectTelegram() {
         // Settle the session first, so the last message says the truth about stay awake.
-        telegram.sync(PowerState.current(), policy: policy)
+        telegram.sync(PowerState.current())
         Task { await telegram.disconnect() }
     }
 

@@ -40,10 +40,6 @@ Keep the `pauline` folder: you update with `git pull && ./install.sh` and uninst
 | Click the switch | Stay awake with the lid closed, or sleep normally again |
 | Right-click the switch | Status, battery, toggle, Telegram and Quit |
 
-<p align="center">
-  <img src="docs/switch.png" width="180" alt="The Pauline switch, off on the left and on on the right, in light and dark menu bars" />
-</p>
-
 | Switch | Meaning |
 | --- | --- |
 | Off: outline, knob on the left | Normal sleep |
@@ -78,23 +74,25 @@ Get messages from your Mac while it stays awake, and answer from your phone. Pau
 1. Right-click the switch, then **Connect Telegram…**
 2. Click **Open BotFather**, send `/newbot` and pick a name. BotFather gives you a token. Use a new bot for each Mac.
 3. Paste the token in Pauline and click **Connect**.
-4. Telegram opens the chat with your bot: tap **Start**. No Telegram on this Mac? Scan the QR code Pauline shows with your phone. Pauline answers "Pauline is connected".
+4. Telegram opens the chat with your bot: tap **Start**. No Telegram on this Mac? Scan the QR code Pauline shows with your phone. The bot answers `Pauline is connected.`
 
-Each time the switch goes on, the chat gets a session:
+Each time the switch goes on, the chat says whether Pauline is on or off, with the battery:
 
 | When | Message |
 | --- | --- |
-| Stay awake turns on | `Stay awake is on, lid open.` and the battery, with an **Allow sleep** button |
-| Battery at 30%, 20% and 10% | `Battery at 20%, 1 h 5 min left. Your Mac is still awake, lid closed. Stay awake turns off on its own at 5%.` with an **Allow sleep** button |
-| Charging is done and the Mac runs on the adapter | `Charging done at 100%. Running on the power adapter.` |
-| Stay awake turns off, whatever the reason | `Stay awake is off. Battery reached 5%.`, `On from 11:02 to 14:32 (3 h 30 min).` and `Your Mac is going to sleep.` |
+| Pauline turns on | `Pauline is on` and `Battery 94%, 20 h left` |
+| Battery at 30%, 20% and 10% | `Pauline is on` and `Battery 20%, 1 h 5 min left`, with a **Turn Pauline off** button |
+| Charging is done | `Pauline is on` and `Battery 100%, charged` |
+| Pauline turns off | `Pauline is off` and the battery |
+
+When you did not turn it off yourself, the closing message says why: `(battery low)`, `(too hot)`, `(Mac shut down)`, `(Pauline crashed)` or `(Mac restarted)`.
 
 The closing message is always the last one of a session:
 
-| Stay awake ends because | The closing message leaves |
+| Pauline turns off because | The closing message leaves |
 | --- | --- |
 | You click the switch, or **Allow Sleep** in the menu | right away |
-| You send `/off` or tap **Allow sleep** | right away |
+| You send `/off` or tap **Turn Pauline off** | right away |
 | The battery reaches 5%, or the Mac overheats | right away, before the Mac goes to sleep |
 | You quit, update or uninstall Pauline, log out, restart or shut down | before Pauline quits |
 | You run `sudo pmset -a disablesleep 0` yourself | within a few seconds |
@@ -102,12 +100,12 @@ The closing message is always the last one of a session:
 | The Mac turns off suddenly (forced restart, kernel panic, empty battery with the floor at 0) | at the next login |
 | The Mac has no internet at that moment | when it is back online, or at the next launch of Pauline if it quit in the meantime |
 
-**Disconnect Telegram** during a session sends a last message too: `Pauline is disconnected from this chat. Stay awake is still on, you will get no more messages here.`
+**Disconnect Telegram** while Pauline is on sends a last message too: `Pauline is disconnected from this chat. It is still on.`
 
 | Command | Answer |
 | --- | --- |
-| `/status` | `Stay awake: on, lid closed` and the battery: `Battery: 64%, charging, full in 1 h 12 min`, or unplugged `Battery: 41%, not charging, 3 h 20 min left` |
-| `/off` | Turns stay awake off, with the closing message. A closed Mac without an external display goes to sleep, it never shuts down. |
+| `/status` | `Pauline is on` or `Pauline is off`, and the battery: `Battery 64%, charging, full in 1 h 12 min`, or unplugged `Battery 41%, 3 h 20 min left` |
+| `/off` | Turns Pauline off, with the closing message. A closed Mac without an external display goes to sleep, it never shuts down. |
 
 Once linked, the bot only answers the chat that tapped Start. A Mac in a bag far from its Wi-Fi has no internet: its opening and closing messages wait until it is back online, reminders and answers older than 2 minutes are skipped, and the safety rules above keep working. The token is stored in `~/Library/Application Support/Pauline`, readable by your user only. **Disconnect Telegram** in the menu removes it. If the bot gets blocked or its token stops working, the menu says so.
 

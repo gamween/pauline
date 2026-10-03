@@ -1,4 +1,3 @@
-import Foundation
 import Testing
 @testable import PaulineCore
 
@@ -125,43 +124,52 @@ struct ChargingDoneTests {
 
 @Suite("Telegram text")
 struct TelegramTextTests {
-    let policy = Policy()
-    let paris = TimeZone(identifier: "Europe/Paris")!
-    let start = Date(timeIntervalSince1970: 1_790_000_000)
-
-    @Test func statusWhileCharging() {
-        let state = PowerState(sleepDisabled: true, batteryCharging: true, batteryPercent: 64, minutesToFull: 72, lidClosed: true)
-        #expect(TelegramText.status(state) == "Stay awake: on, lid closed\nBattery: 64%, charging, full in 1 h 12 min")
+    @Test func onWithTimeLeft() {
+        var state = onBattery(94)
+        state.minutesToEmpty = 1_200
+        #expect(TelegramText.on(state) == "Pauline is on\nBattery 94%, 20 h left")
     }
 
-    @Test func statusOtherwise() {
-        #expect(TelegramText.battery(onBattery(41, awake: false)) == "Battery: 41%, not charging")
-        #expect(TelegramText.battery(charged(80)) == "Battery: 80%, not charging, on power adapter")
-        #expect(TelegramText.battery(charging(50)) == "Battery: 50%, charging")
+    @Test func batteryLines() {
+        #expect(TelegramText.battery(onBattery(41)) == "Battery 41%, on battery")
+        var charging64 = charging(64)
+        charging64.minutesToFull = 72
+        #expect(TelegramText.battery(charging64) == "Battery 64%, charging, full in 1 h 12 min")
+        #expect(TelegramText.battery(charging(50)) == "Battery 50%, charging")
+        #expect(TelegramText.battery(charged(100)) == "Battery 100%, charged")
+        #expect(TelegramText.battery(weakAdapter(60)) == "Battery 60%, plugged in, not charging")
         #expect(TelegramText.battery(PowerState(sleepDisabled: false)) == "No battery")
-        #expect(TelegramText.status(onBattery(41, awake: false)).hasPrefix("Stay awake: off\n"))
     }
 
-    @Test func timeLeftOnBattery() {
-        var state = onBattery(41)
-        state.minutesToEmpty = 200
-        #expect(TelegramText.battery(state) == "Battery: 41%, not charging, 3 h 20 min left")
-        state.lidClosed = true
-        #expect(
-            TelegramText.reminder(percent: 41, state: state, policy: policy)
-                == "Battery at 41%, 3 h 20 min left. Your Mac is still awake, lid closed. Stay awake turns off on its own at 5%."
-        )
-    }
-
-    @Test func noTimeLeftWhilePlugged() {
+    @Test func timeLeftOnlyOnBattery() {
         var state = charged(80)
         state.minutesToEmpty = 200
-        #expect(TelegramText.battery(state) == "Battery: 80%, not charging, on power adapter")
-        #expect(TelegramText.reminder(percent: 20, state: state, policy: policy).hasPrefix("Battery at 20%. "))
+        #expect(TelegramText.battery(state) == "Battery 80%, charged")
     }
 
-    @Test func opening() {
-        #expect(TelegramText.started(charging(50)) == "Stay awake is on, lid open.\nBattery: 50%, charging")
+    @Test func statusSaysOnOrOff() {
+        #expect(TelegramText.status(onBattery(41)).hasPrefix("Pauline is on\n"))
+        #expect(TelegramText.status(onBattery(41, awake: false)) == "Pauline is off\nBattery 41%, on battery")
+    }
+
+    @Test func closingIsBareWhenTurnedOffByHand() {
+        for reason in [CloseReason.mac, .telegram, .quit, .stopped, .elsewhere] {
+            #expect(TelegramText.closed(reason, state: onBattery(90)) == "Pauline is off\nBattery 90%, on battery")
+        }
+    }
+
+    @Test func closingSaysWhyOtherwise() {
+        #expect(TelegramText.closed(.lowBattery, state: onBattery(5)) == "Pauline is off (battery low)\nBattery 5%, on battery")
+        #expect(TelegramText.closed(.overheating, state: charging(70)).hasPrefix("Pauline is off (too hot)\n"))
+        #expect(TelegramText.closed(.shutdown, state: onBattery(50)).hasPrefix("Pauline is off (Mac shut down)\n"))
+        #expect(TelegramText.closed(.crash, state: onBattery(50)).hasPrefix("Pauline is off (Pauline crashed)\n"))
+        #expect(TelegramText.closed(.restart, state: onBattery(50)).hasPrefix("Pauline is off (Mac restarted)\n"))
+    }
+
+    @Test func everyClosingStartsTheSameWay() {
+        for reason in CloseReason.allCases {
+            #expect(TelegramText.closed(reason, state: onBattery(50)).hasPrefix("Pauline is off"))
+        }
     }
 
     @Test func durations() {
@@ -169,64 +177,5 @@ struct TelegramTextTests {
         #expect(TelegramText.duration(45) == "45 min")
         #expect(TelegramText.duration(60) == "1 h")
         #expect(TelegramText.duration(135) == "2 h 15 min")
-    }
-
-    @Test func reminderSaysWhenStayAwakeStops() {
-        var state = onBattery(20)
-        state.lidClosed = true
-        #expect(
-            TelegramText.reminder(percent: 20, state: state, policy: policy)
-                == "Battery at 20%. Your Mac is still awake, lid closed. Stay awake turns off on its own at 5%."
-        )
-    }
-
-    @Test func closingRightAway() {
-        let end = start.addingTimeInterval(12_600)
-        let text = TelegramText.closed(.lowBattery, start: start, end: end, sleeping: true, policy: policy, timeZone: paris, now: end)
-        #expect(text.hasPrefix("Stay awake is off. Battery reached 5%.\nOn from "))
-        #expect(text.contains("(3 h 30 min)."))
-        #expect(text.hasSuffix("\nYour Mac is going to sleep."))
-    }
-
-    @Test func closingAfterACrash() {
-        let text = TelegramText.closed(.crash, start: start, end: nil, sleeping: nil, policy: policy, timeZone: paris, now: start)
-        #expect(text.hasPrefix("Stay awake is off. Pauline stopped unexpectedly and started again.\nIt had been on since "))
-        #expect(!text.contains("sleep"))
-    }
-
-    @Test func everyReasonReadsAsSleepNeverShutdownOfTheApp() {
-        for reason in CloseReason.allCases {
-            let text = TelegramText.closed(reason, start: start, end: start, sleeping: false, policy: policy, timeZone: paris, now: start)
-            #expect(text.hasPrefix("Stay awake is off. "))
-            #expect(text.hasSuffix("Normal sleep is back."))
-        }
-    }
-
-    @Test func clockUsesTheGivenTimeZone() {
-        // 1_790_000_000 is 2026-09-21 14:13:20 UTC, 16:13 in Paris.
-        let end = start.addingTimeInterval(60)
-        let text = TelegramText.closed(.mac, start: start, end: end, sleeping: nil, policy: policy, timeZone: paris, now: end)
-        #expect(text.contains("On from 16:13 to 16:14 (1 min)."))
-    }
-
-    @Test func durationMatchesThePrintedTimes() {
-        // 16:13:59 to 16:14:00 reads as one minute, like the two times say.
-        let from = start.addingTimeInterval(39), to = start.addingTimeInterval(40)
-        let text = TelegramText.closed(.mac, start: from, end: to, sleeping: nil, policy: policy, timeZone: paris, now: to)
-        #expect(text.contains("On from 16:13 to 16:14 (1 min)."))
-    }
-
-    @Test func addsTheDayAcrossMidnight() {
-        // 2026-09-20 23:50 to 2026-09-21 00:10 in Paris, a Sunday night.
-        let from = Date(timeIntervalSince1970: 1_789_941_000), to = from.addingTimeInterval(1_200)
-        let text = TelegramText.closed(.mac, start: from, end: to, sleeping: nil, policy: policy, timeZone: paris, now: to)
-        #expect(text.contains("On from Sun 23:50 to 00:10 (20 min)."))
-    }
-
-    @Test func aLateClosingNamesTheDay() {
-        let text = TelegramText.closed(
-            .restart, start: start, end: nil, sleeping: nil, policy: policy, timeZone: paris, now: start.addingTimeInterval(86_400)
-        )
-        #expect(text.hasSuffix("It had been on since Mon 16:13."))
     }
 }
