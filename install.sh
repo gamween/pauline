@@ -92,7 +92,7 @@ for attempt in 1 2 3 4 5; do
   sleep 1
 done
 
-printf '\nDone. Pauline is the switch in your menu bar.\n'
+printf '\nDone. Pauline is in your menu bar.\n'
 printf '  Click        Stay awake, even with the lid closed.\n'
 printf '  Click again  Sleep normally.\n'
 printf '  Right-click  Status, battery, Telegram and Quit.\n'
