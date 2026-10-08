@@ -43,18 +43,14 @@ struct TelegramConfig: Codable {
         }
     }
 
-    func save() {
+    func save() throws {
         let manager = FileManager.default
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .secondsSince1970
-        do {
-            try manager.createDirectory(at: Self.folder, withIntermediateDirectories: true)
-            try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: Self.folder.path)
-            try encoder.encode(self).write(to: Self.file, options: .atomic)
-            try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.file.path)
-        } catch {
-            NSLog("Pauline could not save the Telegram settings: \(error.localizedDescription)")
-        }
+        try manager.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: Self.folder.path)
+        try encoder.encode(self).write(to: Self.file, options: .atomic)
+        try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.file.path)
     }
 
     static func delete() {
@@ -71,9 +67,10 @@ struct TelegramConfig: Codable {
 /// A thin client for the few Bot API methods Pauline uses.
 struct TelegramAPI: Sendable {
     let token: String
+    var transport: URLSession = session
 
     /// Ephemeral: no cache or cookie store on disk, so the bot token in each URL never lands there.
-    private static let session = URLSession(configuration: .ephemeral)
+    static let session = URLSession(configuration: .ephemeral)
 
     /// A Bot API error, with Telegram's error code when there is one.
     struct Failure: LocalizedError {
@@ -107,7 +104,7 @@ struct TelegramAPI: Sendable {
         encoder.keyEncodingStrategy = .convertToSnakeCase
         request.httpBody = try encoder.encode(body)
 
-        let (data, response) = try await Self.session.data(for: request)
+        let (data, response) = try await transport.data(for: request)
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         guard let envelope = try? decoder.decode(Envelope<Result>.self, from: data) else {
@@ -216,18 +213,57 @@ final class TelegramBot {
     /// Called for each command from the linked chat.
     var onCommand: ((Command) -> Void)?
 
-    private var config = TelegramConfig.load()
+    private var config: TelegramConfig?
+    private let saveConfig: (TelegramConfig) throws -> Void
+    private let deleteConfig: () -> Void
+    private let transport: URLSession
+    private let now: () -> Date
+    private var persistencePending = false
+    private var storageProblem: String?
+    private let retrySignal = WakeSignal()
+    private let outboxSignal = WakeSignal()
+
+    init(config: TelegramConfig? = TelegramConfig.load(),
+         transport: URLSession = TelegramAPI.session,
+         now: @escaping () -> Date = Date.init,
+         save: @escaping (TelegramConfig) throws -> Void = { try $0.save() },
+         delete: @escaping () -> Void = TelegramConfig.delete) {
+        self.config = config
+        self.transport = transport
+        self.now = now
+        self.saveConfig = save
+        self.deleteConfig = delete
+    }
+
+    @discardableResult
+    private func persist() -> Bool {
+        guard let config else { return true }
+        do {
+            try saveConfig(config)
+            persistencePending = false
+            storageProblem = nil
+            return true
+        } catch {
+            persistencePending = true
+            storageProblem = "Telegram: settings could not be saved; check disk space and permissions"
+            return false
+        }
+    }
     /// Lasting problems for the menu. Sending and polling keep their own, so one success cannot hide the other.
     private var sendProblem: String?
     private var pollProblem: String?
-    var problem: String? { sendProblem ?? pollProblem }
+    var problem: String? { storageProblem ?? sendProblem ?? pollProblem }
 
-    private var outbox: [Outgoing] = []
+    private var outbox: [Outgoing] = [] {
+        didSet { outboxSignal.signal() }
+    }
     private var worker: Task<Void, Never>?
     /// The message whose request is in flight: it may already be delivered, so it is never pulled out.
     private var sending: UUID?
     /// Set when a session message is queued or a drain starts, to cut a retry wait short.
-    private var retryNow = false
+    private var retryNow = false {
+        didSet { if retryNow { retrySignal.signal() } }
+    }
     /// Bumped by stop(), so a worker cancelled by a reconnect cannot touch the new outbox.
     private var generation = 0
     /// Disconnecting: the last message is on its way, nothing new may be queued behind it.
@@ -255,7 +291,7 @@ final class TelegramBot {
 
         let id = UUID()
         let kind: Kind
-        let created = Date()
+        var created = Date()
         let text: String
         /// Adds a Turn Pauline off button, tied to the session that started at this date.
         var offButton: Date?
@@ -326,13 +362,13 @@ final class TelegramBot {
             let text = session.closingText ?? TelegramText.closed(reason, state: state)
             if session.closingText == nil {
                 self.config?.session?.closingText = text
-                self.config?.save()
+                persist()
             }
             enqueue(Outgoing(kind: .closing(session.start), text: text))
         } else if config.session?.endReason != nil {
             // Still running after all: the reason of an earlier quit no longer applies.
             self.config?.session?.endReason = nil
-            self.config?.save()
+            persist()
         }
         if isLinked {
             setCommands()
@@ -349,7 +385,7 @@ final class TelegramBot {
                 errorDescription: "This does not look like a bot token. Copy the whole token BotFather sent, it looks like 123456789:AAH..."
             )
         }
-        let api = TelegramAPI(token: token)
+        let api = TelegramAPI(token: token, transport: transport)
         let bot: TelegramAPI.Bot
         let webhook: TelegramAPI.WebhookInfo
         do {
@@ -374,7 +410,10 @@ final class TelegramBot {
         let code = String((0..<16).map { _ in alphabet.randomElement()! })
         _ = await disconnect()
         config = TelegramConfig(token: token, botUsername: username, chatID: nil, linkCode: code, session: nil)
-        config?.save()
+        guard persist() else {
+            config = nil
+            throw TelegramAPI.Failure(code: nil, errorDescription: storageProblem)
+        }
         pollTask = Task { await poll() }
     }
 
@@ -394,7 +433,7 @@ final class TelegramBot {
         let stuck = outbox.contains(where: \.endsSession)
         let problem = stuck ? (sendProblem ?? "Telegram could not be reached in time, the chat keeps its previous message.") : nil
         stop()
-        TelegramConfig.delete()
+        deleteConfig()
         config = nil
         return problem
     }
@@ -404,7 +443,7 @@ final class TelegramBot {
         quitEndReason = reason
         guard isLinked, let start = activeStart, config?.session?.start == start else { return }
         config?.session?.endReason = reason
-        config?.save()
+        persist()
     }
 
     private func stop() {
@@ -419,6 +458,9 @@ final class TelegramBot {
         offset = nil
         sendProblem = nil
         pollProblem = nil
+        storageProblem = nil
+        persistencePending = false
+        retrySignal.signal()
     }
 
     // MARK: Session
@@ -448,7 +490,7 @@ final class TelegramBot {
         let text = TelegramText.closed(reason, state: state)
         if config?.session?.start == start {
             config?.session?.closingText = text
-            config?.save()
+            persist()
         }
         enqueue(Outgoing(kind: .closing(start), text: text))
     }
@@ -469,9 +511,10 @@ final class TelegramBot {
         retryNow = true
         drains += 1
         defer { drains -= 1 }
-        let deadline = Date().addingTimeInterval(timeout)
-        while !outbox.isEmpty, Date() < deadline {
-            try? await Task.sleep(for: .milliseconds(100))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
+        while !outbox.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled {
+            let revision = outboxSignal.revision
+            _ = await outboxSignal.wait(after: revision, timeout: ContinuousClock.now.duration(to: deadline))
         }
     }
 
@@ -493,8 +536,25 @@ final class TelegramBot {
     /// Retries start after `firstRetry` seconds and double up to `longRetry`, the wait for errors that last.
     private static let firstRetry = 5
     private static let longRetry = 60
+    static let transientLimit = 100
+
+    /// Expire the entire queue, including items behind a failed durable session message.
+    private func prune() {
+        let date = now()
+        outbox.removeAll { $0.session == nil && $0.id != sending && date.timeIntervalSince($0.created) > Self.staleAfter }
+    }
+
+    var pendingCount: Int { outbox.count }
 
     private func enqueue(_ item: Outgoing) {
+        prune()
+        if item.session == nil,
+           outbox.filter({ $0.session == nil }).count >= Self.transientLimit,
+           let index = outbox.firstIndex(where: { $0.session == nil && $0.id != sending }) {
+            outbox.remove(at: index)
+        }
+        var item = item
+        item.created = now()
         outbox.append(item)
         if item.session != nil {
             retryNow = true
@@ -509,7 +569,7 @@ final class TelegramBot {
         var delay = Self.firstRetry
         while generation == self.generation, !Task.isCancelled,
               let item = outbox.first, let config, let chatID = config.chatID {
-            let age = Date().timeIntervalSince(item.created)
+            let age = now().timeIntervalSince(item.created)
             if item.session == nil, age > Self.staleAfter {
                 outbox.removeFirst()
                 continue
@@ -519,7 +579,13 @@ final class TelegramBot {
                 self.config?.session = TelegramConfig.Session(
                     start: start, closingText: queuedClosingText(for: start), endReason: quitEndReason
                 )
-                self.config?.save()
+                persistencePending = true
+            }
+            // Never announce a session before its recovery record is durable. Retry a failed
+            // write even when the in-memory session was already updated on the previous attempt.
+            if persistencePending, !persist() {
+                _ = await backoff(seconds: Self.firstRetry, interruptible: true)
+                continue
             }
 
             let keyboard = item.offButton.map {
@@ -531,12 +597,12 @@ final class TelegramBot {
             retryNow = false
             var failure: TelegramAPI.Failure?
             do {
-                let _: TelegramAPI.Ignored = try await TelegramAPI(token: config.token).call("sendMessage", message)
+                let _: TelegramAPI.Ignored = try await TelegramAPI(token: config.token, transport: transport).call("sendMessage", message)
             } catch {
                 failure = error as? TelegramAPI.Failure ?? TelegramAPI.Failure(code: nil, errorDescription: error.localizedDescription)
             }
-            sending = nil
             guard generation == self.generation, outbox.first?.id == item.id else { continue }
+            sending = nil
 
             guard let failure else {
                 sendProblem = nil
@@ -577,15 +643,16 @@ final class TelegramBot {
     /// Waits before a retry. A session message queued or a drain cuts the wait short, except a 429 retry_after.
     /// Returns true when cut short.
     private func backoff(seconds: Int, interruptible: Bool) async -> Bool {
-        let deadline = Date().addingTimeInterval(TimeInterval(seconds))
-        while Date() < deadline, !Task.isCancelled {
-            if interruptible, retryNow {
-                retryNow = false
-                return true
-            }
-            try? await Task.sleep(for: .milliseconds(250))
+        prune()
+        guard !Task.isCancelled else { return false }
+        if !interruptible {
+            try? await Task.sleep(for: .seconds(seconds))
+            return false
         }
-        return false
+        if retryNow { retryNow = false; return true }
+        let changed = await retrySignal.wait(after: retrySignal.revision, timeout: .seconds(seconds))
+        if changed { retryNow = false }
+        return changed
     }
 
     /// The closing text already queued for a session whose opening is about to be sent.
@@ -602,7 +669,7 @@ final class TelegramBot {
         case .closing(let start), .farewell(let start):
             if config?.session?.start == start {
                 config?.session = nil
-                config?.save()
+                persist()
             }
         case .opening, .notice, .reply:
             break
@@ -630,7 +697,7 @@ final class TelegramBot {
         while !Task.isCancelled, let config {
             do {
                 let request = TelegramAPI.GetUpdates(offset: offset, timeout: 50, allowedUpdates: ["message", "callback_query"])
-                let updates: [TelegramAPI.Update] = try await TelegramAPI(token: config.token)
+                let updates: [TelegramAPI.Update] = try await TelegramAPI(token: config.token, transport: transport)
                     .call("getUpdates", request, timeout: 65)
                 pollProblem = nil
                 delay = Self.firstRetry
@@ -713,7 +780,7 @@ final class TelegramBot {
     private func link(_ chatID: Int64) {
         config?.chatID = chatID
         config?.linkCode = nil
-        config?.save()
+        persist()
         setCommands()
         reply(TelegramText.connected)
     }
@@ -731,7 +798,7 @@ final class TelegramBot {
     private func fireAndForget<Body: Encodable & Sendable>(_ method: String, _ body: Body) {
         guard let token = config?.token else { return }
         Task {
-            let _: TelegramAPI.Ignored? = try? await TelegramAPI(token: token).call(method, body)
+            let _: TelegramAPI.Ignored? = try? await TelegramAPI(token: token, transport: transport).call(method, body)
         }
     }
 }
