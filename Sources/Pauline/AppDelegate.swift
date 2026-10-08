@@ -7,7 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let telegram = TelegramBot()
     private var safety = Safety()
     private var notifier = Notifier()
-    /// The last pmset change went through. False means the sudoers rule from install.sh is missing.
+    /// The last pmset change completed and its flag was confirmed.
     private var pmsetAllowed = true
     /// While a closing message is on its way, a closed Mac waits for it before sleeping, `sleepHoldLimit` at most.
     private var sleepHeldUntil: Date?
@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private var activity: NSObjectProtocol?
     private var signalSources: [DispatchSourceSignal] = []
+    private let powerOperation = PowerOperation()
 
     /// `defaults write com.gamween.pauline BatteryFloor -int 10`, read on every check.
     private var policy: Policy {
@@ -45,15 +46,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         workspace.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
         workspace.addObserver(self, selector: #selector(willPowerOff), name: NSWorkspace.willPowerOffNotification, object: nil)
 
+        powerOperation.run { await self.start() }
+    }
+
+    private func start() async {
         // Fail safe: every launch gives sleep back, so a crash, a force quit or a restart
         // (the flag survives reboots) never leaves the Mac stuck awake. Doubles as a permission check.
         let actions = safety.launch(PowerState.current())
-        perform(actions.filter { $0 == .restoreSleep })
+        await perform(actions.filter { $0 == .restoreSleep })
 
         // A session a crash, a restart or an offline quit left open gets its closing message,
         // once it is known whether sleep really came back.
         telegram.onCommand = { [weak self] command in self?.handle(command) }
         telegram.start(bootedAt: bootTime(), state: PowerState.current())
+        guard !isTerminating else { return }
 
         // A closed Mac waits for that closing message before it sleeps.
         if actions.contains(.sleepNow) {
@@ -61,20 +67,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 sleepHeldUntil = Date().addingTimeInterval(Self.sleepHoldLimit)
                 releaseHeldSleepAfterDrain()
             } else {
-                perform([.sleepNow])
+                await perform([.sleepNow])
             }
         }
 
+        guard !isTerminating else { return }
         let timer = Timer(timeInterval: 5, target: self, selector: #selector(check), userInfo: nil, repeats: true)
         timer.tolerance = 1
         // Common modes keep the checks running while a menu or an alert is open.
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
-        check()
+        await checkState()
     }
 
     /// Quit, logout, shutdown or a signal: give sleep back and let the closing message leave first.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isTerminating else { return .terminateLater }
         isTerminating = true
         timer?.invalidate()
         // Quitting: the icon greys out, and the guards ignore clicks that could start a session behind
@@ -83,22 +91,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let reason = Self.quitReasonFromMacOS() {
             quitReason = reason
         }
+        Task {
+            // An in-flight enable must finish before the final restore; never race the two.
+            await powerOperation.stop()
+            await finishQuitting()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    private func finishQuitting() async {
         let state = PowerState.current()
-        if state.sleepDisabled, !SleepSetting.setSleepDisabled(false) {
+        var restored = !state.sleepDisabled
+        if !restored { restored = await SleepSetting.setSleepDisabled(false) }
+        if !restored {
             // Still on: say so, and keep the session on disk for the next launch to close with this reason.
             telegram.keepOpenAfterQuit(quitReason)
             telegram.notify(TelegramText.quitStillOn, offButton: false)
         } else {
             telegram.close(quitReason, state: state)
         }
-        guard telegram.hasPendingMessages else { return .terminateNow }
-
-        Task {
+        if telegram.hasPendingMessages {
             // Well under launchd's ExitTimeOut (15 s, set by install.sh), after which it sends SIGKILL.
             await telegram.drain(timeout: quitReason == .stopped ? 4 : 5)
-            NSApp.reply(toApplicationShouldTerminate: true)
         }
-        return .terminateLater
     }
 
     /// Logout, restart or shutdown, as named by the quit Apple event macOS sends.
@@ -110,12 +126,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case kAERestart, kAEShowRestartDialog: return .restarting
         case kAEShutDown, kAEShowShutdownDialog: return .shutdown
         default: return nil
-        }
-    }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        if SleepSetting.isSleepDisabled {
-            SleepSetting.setSleepDisabled(false)
         }
     }
 
@@ -160,6 +170,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Checks
 
     @objc private func check() {
+        powerOperation.run { await self.checkState() }
+    }
+
+    private func checkState() async {
         guard !isTerminating else { return }
         closedThisCheck = false
         let policy = self.policy
@@ -178,9 +192,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let actions = safety.check(reading)
         if actions.contains(.restoreSleep), let danger = policy.danger(reading) {
             // Pauline gives sleep back on its own: battery floor or heat.
-            giveSleepBack(actions, reason: CloseReason(danger), state: reading)
+            await giveSleepBack(actions, reason: CloseReason(danger), state: reading)
         } else {
-            perform(actions)
+            await perform(actions)
         }
 
         let state = actions.isEmpty ? reading : PowerState.current()
@@ -196,12 +210,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Turns Pauline off while it runs: icon or menu, Telegram, battery floor or heat.
     /// Sleep comes back right away; a closed Mac waits for the closing message before it sleeps.
-    private func giveSleepBack(_ actions: [Action], reason: CloseReason, state: PowerState) {
+    private func giveSleepBack(_ actions: [Action], reason: CloseReason, state: PowerState) async {
         let sleeping = actions.contains(.sleepNow)
         if sleeping, telegram.isLinked {
             sleepHeldUntil = Date().addingTimeInterval(Self.sleepHoldLimit)
         }
-        perform(actions)
+        await perform(actions)
 
         guard pmsetAllowed else {
             // pmset refused: Pauline is still on, say so instead of closing the session.
@@ -226,34 +240,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func releaseHeldSleepAfterDrain() {
         Task {
             await telegram.drain(timeout: Self.sleepHoldLimit)
-            releaseHeldSleep()
+            await powerOperation.runWhenIdle { await self.releaseHeldSleep() }
         }
     }
 
-    private func perform(_ actions: [Action]) {
+    private func perform(_ actions: [Action]) async {
         for action in actions {
+            guard !isTerminating else { return }
             switch action {
             case .restoreSleep:
-                pmsetAllowed = SleepSetting.setSleepDisabled(false)
-                if pmsetAllowed {
-                    // powerd applies it a moment later: until then sleepnow is refused and the flag reads stale.
-                    SleepSetting.waitForFlag(disabled: false)
-                }
+                pmsetAllowed = await SleepSetting.setSleepDisabled(false)
+                guard pmsetAllowed else { return }
             case .sleepNow:
                 if let until = sleepHeldUntil, Date() < until { continue }
-                SleepSetting.sleepNow()
+                let fresh = PowerState.current()
+                guard fresh.lidClosed, !fresh.externalDisplayConnected, !fresh.sleepDisabled else { continue }
+                await SleepSetting.sleepNow()
             case .sleepDisplay:
-                SleepSetting.sleepDisplayNow()
+                let fresh = PowerState.current()
+                guard fresh.lidClosed, !fresh.externalDisplayConnected else { continue }
+                await SleepSetting.sleepDisplayNow()
             }
         }
     }
 
     /// The closing message went out (or gave up): a closed Mac can sleep now if it still has to.
     /// Decided on a fresh reading, so a Mac opened in the meantime stays awake.
-    private func releaseHeldSleep() {
+    private func releaseHeldSleep() async {
         guard sleepHeldUntil != nil else { return }
         sleepHeldUntil = nil
-        perform(safety.check(PowerState.current()))
+        await perform(safety.check(PowerState.current()))
     }
 
     private func render(_ state: PowerState) {
@@ -283,6 +299,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Telegram commands
 
     private func handle(_ command: TelegramBot.Command) {
+        guard !isTerminating else { return }
+        Task {
+            await powerOperation.runWhenIdle { await self.handleCommand(command) }
+        }
+    }
+
+    private func handleCommand(_ command: TelegramBot.Command) async {
+        guard !isTerminating else { return }
         let state = PowerState.current()
         switch command {
         case .status:
@@ -292,7 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 telegram.reply(TelegramText.alreadyOff)
                 return
             }
-            giveSleepBack(safety.allowSleep(state), reason: .telegram, state: state)
+            await giveSleepBack(safety.allowSleep(state), reason: .telegram, state: state)
             render(PowerState.current())
         }
     }
@@ -310,29 +334,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggle() {
+        powerOperation.run { await self.toggleState() }
+    }
+
+    private func toggleState() async {
         guard !isTerminating else { return }
         let state = PowerState.current()
         let policy = self.policy
 
         if state.sleepDisabled {
-            giveSleepBack(safety.allowSleep(state), reason: .mac, state: state)
+            await giveSleepBack(safety.allowSleep(state), reason: .mac, state: state)
         } else {
             if let danger = policy.danger(state) {
                 let refusal = StatusText.refusal(danger, policy: policy)
-                alert(refusal.title, refusal.message)
+                afterThisTask { $0.alert(refusal.title, refusal.message) }
                 return
             }
-            pmsetAllowed = SleepSetting.setSleepDisabled(true)
+            pmsetAllowed = await SleepSetting.setSleepDisabled(true)
             if pmsetAllowed {
-                SleepSetting.waitForFlag(disabled: true)
                 telegram.sync(PowerState.current())
             }
         }
-        if !pmsetAllowed {
-            alert(
-                "Pauline is not allowed to change sleep",
-                "Run ./install.sh from the Pauline folder again. It asks for your password once to allow it."
-            )
+        if !pmsetAllowed, !isTerminating {
+            afterThisTask { $0.alert(
+                "Pauline could not change sleep",
+                "The command failed or macOS did not confirm the change in time. If this persists, run ./install.sh again."
+            ) }
         }
         render(PowerState.current())
     }
@@ -481,7 +508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func afterThisTask(_ body: @escaping @MainActor (AppDelegate) -> Void) {
         RunLoop.main.perform(inModes: [.default]) { [weak self] in
             MainActor.assumeIsolated {
-                if let self { body(self) }
+                if let self, !self.isTerminating { body(self) }
             }
         }
     }

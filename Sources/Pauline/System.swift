@@ -9,27 +9,31 @@ enum SleepSetting {
     /// `pmset -a disablesleep` is the only setting that also covers a closed lid.
     /// It needs root, so it goes through `sudo -n`, allowed by the rule `install.sh` adds.
     /// `-k` ignores cached sudo credentials, so only that rule can make it pass.
-    /// Returns false when the rule is missing.
+    /// Returns false on command failure, timeout or an unconfirmed flag.
     @discardableResult
-    static func setSleepDisabled(_ disabled: Bool) -> Bool {
-        Shell.run("/usr/bin/sudo", "-k", "-n", "/usr/bin/pmset", "-a", "disablesleep", disabled ? "1" : "0") == 0
+    static func setSleepDisabled(_ disabled: Bool) async -> Bool {
+        guard await Shell.runAsync("/usr/bin/sudo", ["-k", "-n", "/usr/bin/pmset", "-a", "disablesleep", disabled ? "1" : "0"]) == 0 else { return false }
+        return await waitForFlag(disabled: disabled)
     }
 
     /// powerd applies a change a moment after pmset returns. Waits up to `timeout` seconds for the flag
     /// to read `disabled`, usually a few milliseconds.
-    static func waitForFlag(disabled: Bool, timeout: TimeInterval = 2) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while isSleepDisabled != disabled, Date() < deadline {
-            usleep(20_000)
+    static func waitForFlag(disabled: Bool, timeout: Duration = .seconds(2),
+                            read: @Sendable () -> Bool = { isSleepDisabled }) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while read() != disabled {
+            guard ContinuousClock.now < deadline, !Task.isCancelled else { return false }
+            do { try await Task.sleep(for: .milliseconds(20)) } catch { return false }
         }
+        return true
     }
 
-    static func sleepNow() {
-        Shell.run("/usr/bin/pmset", "sleepnow")
+    static func sleepNow() async {
+        await Shell.runAsync("/usr/bin/pmset", ["sleepnow"])
     }
 
-    static func sleepDisplayNow() {
-        Shell.run("/usr/bin/pmset", "displaysleepnow")
+    static func sleepDisplayNow() async {
+        await Shell.runAsync("/usr/bin/pmset", ["displaysleepnow"])
     }
 
     static var isSleepDisabled: Bool { rootDomainFlag("SleepDisabled") }
@@ -125,11 +129,24 @@ extension PowerState {
 }
 
 enum Shell {
-    /// Runs a program, waits for it and returns its exit code (-1 if it could not run or crashed).
-    /// Uses posix_spawn and waitpid rather than Process, whose waitUntilExit spins the run loop
-    /// and could let a timer tick fire in the middle of a toggle.
+    /// Runtime commands wait on a utility queue, never on AppKit's main thread.
+    @discardableResult
+    static func runAsync(_ path: String, _ arguments: [String], timeout: Duration = .seconds(2)) async -> Int32 {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: runBounded(path, arguments, timeout: timeout))
+            }
+        }
+    }
+
+    /// Only the pre-AppKit launchd handover uses the synchronous entry point.
     @discardableResult
     static func run(_ path: String, _ arguments: String...) -> Int32 {
+        runBounded(path, arguments, timeout: .seconds(2))
+    }
+
+    /// Returns -1 on spawn failure, signal exit or timeout. The child has its own process group.
+    static func runBounded(_ path: String, _ arguments: [String], timeout: Duration) -> Int32 {
         let argv = ([path] + arguments).map { strdup($0) } + [nil]
         let envp = [strdup("PATH=/usr/bin:/bin:/usr/sbin:/sbin"), nil]
         defer { (argv + envp).forEach { free($0) } }
@@ -148,14 +165,36 @@ enum Shell {
         var defaultSignals = sigset_t()
         sigfillset(&defaultSignals)
         posix_spawnattr_setsigdefault(&attributes, &defaultSignals)
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSIGDEF))
+        posix_spawnattr_setpgroup(&attributes, 0)
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETPGROUP))
 
         var pid = pid_t()
         guard posix_spawn(&pid, path, &actions, &attributes, argv, envp) == 0 else { return -1 }
 
         var status: Int32 = 0
-        while waitpid(pid, &status, 0) == -1 {
-            guard errno == EINTR else { return -1 }
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while true {
+            let result = waitpid(pid, &status, WNOHANG)
+            if result == pid { break }
+            if result == -1, errno != EINTR { return -1 }
+            if ContinuousClock.now >= deadline {
+                // TERM lets sudo forward termination to a privileged child. Kill the remaining
+                // process group after a short grace period; reaping must not extend our deadline.
+                kill(-pid, SIGTERM)
+                usleep(50_000)
+                kill(-pid, SIGKILL)
+                let child = pid
+                let reaper = DispatchSource.makeProcessSource(identifier: child, eventMask: .exit, queue: .global(qos: .utility))
+                reaper.setEventHandler {
+                    var discarded: Int32 = 0
+                    while waitpid(child, &discarded, WNOHANG) == -1 && errno == EINTR {}
+                    reaper.cancel()
+                    reaper.setEventHandler {}
+                }
+                reaper.resume()
+                return -1
+            }
+            usleep(10_000)
         }
         // WIFEXITED and WEXITSTATUS are C macros Swift cannot import.
         let exitedNormally = status & 0x7f == 0
