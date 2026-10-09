@@ -10,5 +10,6 @@ let package = Package(
         // The menu bar app: AppKit, IOKit, pmset and the Telegram client.
         .executableTarget(name: "Pauline", dependencies: ["PaulineCore"]),
         .testTarget(name: "PaulineCoreTests", dependencies: ["PaulineCore"]),
+        .testTarget(name: "PaulineTests", dependencies: ["Pauline"]),
     ]
 )
